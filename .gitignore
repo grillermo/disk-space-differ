@@ -1,0 +1,4 @@
+/disk-space-differ
+*.db
+*.db-wal
+*.db-shm

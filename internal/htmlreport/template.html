@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>disk-space-differ report</title>
+<style>
+  /* Palette roles. Dark is a selected set of steps for the dark surface, not an
+     automatic flip. Declared under both the media query (OS setting) and the
+     data-theme scope (explicit toggle), so the toggle wins either way. */
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --grew: #e34948;
+    --freed: #2a78d6;
+    --zero: #c3c2b7;
+    --good-text: #006300;
+    --hover-wash: rgba(11, 11, 11, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --grew: #e66767;
+      --freed: #3987e5;
+      --zero: #383835;
+      --good-text: #0ca30c;
+      --hover-wash: rgba(255, 255, 255, 0.07);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --grew: #e66767;
+    --freed: #3987e5;
+    --zero: #383835;
+    --good-text: #0ca30c;
+    --hover-wash: rgba(255, 255, 255, 0.07);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  header.page {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 28px;
+  }
+  header.page h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  header.page .meta { color: var(--text-muted); font-size: 13px; }
+
+  button {
+    font: inherit; color: var(--text-secondary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--hover-wash); }
+  button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+
+  /* One filter row, above everything it scopes. */
+  .filters {
+    display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+    padding-bottom: 20px; margin-bottom: 24px; border-bottom: 1px solid var(--border);
+  }
+  .filter-group { display: flex; align-items: center; gap: 8px; }
+  /* display:flex would otherwise beat the UA rule for the hidden attribute. */
+  .filter-group[hidden] { display: none; }
+  .filter-group > .label {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-muted);
+  }
+  .segmented { display: flex; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .segmented button { border: 0; background: transparent; border-radius: 6px; padding: 5px 12px; }
+  .segmented button[aria-pressed="true"] { background: var(--hover-wash); color: var(--text-primary); font-weight: 600; }
+  select {
+    font: inherit; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+
+  /* KPI row */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .tile .label { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .tile .value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+  .tile.hero .value { font-size: 48px; line-height: 1.1; letter-spacing: -0.03em; }
+  .tile .sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+  .tile .value.up { color: var(--grew); }
+  .tile .value.down { color: var(--good-text); }
+
+  /* Cards */
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px 16px; margin-bottom: 20px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .card .caption { font-size: 13px; color: var(--text-muted); margin: 0 0 16px; }
+  .chart-host { position: relative; }
+  .chart-host svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart-host:focus-visible { outline: 2px solid var(--series-1); outline-offset: 4px; border-radius: 8px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; }
+  .legend-item { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); }
+  .legend-key { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+  .legend-key.rect { height: 10px; width: 10px; border-radius: 2px; }
+
+  /* Tooltip: value leads, series name follows. */
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font-size: 13px; min-width: 150px; max-width: 340px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.14); z-index: 5;
+  }
+  .tooltip[data-show="1"] { opacity: 1; }
+  .tooltip .tt-head { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .tooltip .tt-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+  .tooltip .tt-key { width: 12px; height: 2px; border-radius: 1px; flex: none; transform: translateY(-3px); }
+  /* The value must never wrap; the series name is what gives way. */
+  .tooltip .tt-val { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-primary); white-space: nowrap; flex: none; }
+  .tooltip .tt-name { color: var(--text-secondary); white-space: nowrap; min-width: 0; }
+
+  /* Table view: the WCAG-clean twin of every chart above. */
+  details.table-view { margin-top: 4px; }
+  details.table-view summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; padding: 6px 0; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th[role="button"] { cursor: pointer; user-select: none; }
+  th[role="button"]:hover { color: var(--text-primary); }
+  td.path { color: var(--text-primary); word-break: break-all; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--text-secondary); }
+
+  .empty { color: var(--text-muted); padding: 28px 0; text-align: center; }
+  footer.page { color: var(--text-muted); font-size: 12px; margin-top: 32px; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a,#eda100,#e87ba4,#008300">
+<div class="wrap">
+
+  <header class="page">
+    <div>
+      <h1>Disk growth report</h1>
+      <div class="meta">Generated {{.Generated}} · disk-space-differ {{.Version}}</div>
+    </div>
+    <button id="theme-toggle" type="button" aria-label="Toggle colour theme">Theme</button>
+  </header>
+
+  <div class="filters" id="filters">
+    <div class="filter-group" id="root-group" hidden>
+      <span class="label">Folder</span>
+      <select id="root-select"></select>
+    </div>
+    <div class="filter-group">
+      <span class="label">Range</span>
+      <div class="segmented" id="range-seg" role="group" aria-label="Time range"></div>
+    </div>
+  </div>
+
+  <main id="main"></main>
+
+  <footer class="page">
+    Sizes are allocated blocks. Growth is attributed exclusively: each directory is
+    charged only the bytes it is responsible for, never its descendants', so the
+    figures never double count down a path.
+  </footer>
+</div>
+
+<script>
+const DATA = {{.Payload}};
+
+/* ---------- formatting ---------- */
+
+const UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+
+function fmtBytes(n) {
+  const neg = n < 0;
+  let v = Math.abs(n), u = 0;
+  while (v >= 1024 && u < UNITS.length - 1) { v /= 1024; u++; }
+  let s;
+  if (u === 0) s = Math.round(v) + " B";
+  else if (v < 10) s = v.toFixed(2) + " " + UNITS[u];
+  else if (v < 100) s = v.toFixed(1) + " " + UNITS[u];
+  else s = v.toFixed(0) + " " + UNITS[u];
+  return neg ? "-" + s : s;
+}
+const fmtSigned = (n) => (n > 0 ? "+" : "") + fmtBytes(n);
+const fmtDate = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+/*
+ * Runs bunched inside a day would render as a row of identical dates, so the
+ * axis switches to clock time when the whole range fits in about a day.
+ */
+function axisLabeller(times) {
+  const span = times[times.length - 1] - times[0];
+  return span < 36 * 3600 ? fmtTime : fmtDate;
+}
+const fmtDateTime = (t) => new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/* ---------- tiny DOM/SVG helpers ---------- */
+
+const NS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs = {}) {
+  const el = document.createElementNS(NS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;  // labels are untrusted data
+  return n;
+}
+
+/*
+ * Nice round tick values. The step is chosen on a decimal magnitude *within*
+ * the binary unit (MiB, GiB): picking it on the binary magnitude alone lands on
+ * a step far too small for the range and floods the axis with labels.
+ */
+function ticks(maxV, count) {
+  if (maxV <= 0) return [0];
+  let unit = 1;
+  while (maxV / unit >= 1024 && unit < Math.pow(1024, 5)) unit *= 1024;
+
+  const raw = maxV / unit / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag * unit;
+
+  const out = [];
+  for (let v = 0; v <= maxV * 1.0001 && out.length < 12; v += step) out.push(v);
+  if (out[out.length - 1] < maxV) out.push(out[out.length - 1] + step);
+  return out;
+}
+
+/* ---------- state ---------- */
+
+const state = { rootIdx: 0, rangeKey: null };
+
+function currentRoot() { return DATA.roots[state.rootIdx]; }
+function currentRange() {
+  const r = currentRoot();
+  return r.ranges.find((x) => x.key === state.rangeKey) || r.ranges[r.ranges.length - 1];
+}
+
+/* ---------- charts ---------- */
+
+/*
+ * Line chart. One series gets an area wash and no legend (the title names it);
+ * several get a legend plus selective end labels. X is the run index because a
+ * range is defined as "the last N runs"; ticks carry the dates.
+ */
+function lineChart(host, opts) {
+  const { series, times, singleHue } = opts;
+  const width = Math.max(host.clientWidth || 720, 320);
+  const m = { top: 16, right: singleHue ? 96 : 108, bottom: 34, left: 68 };
+  const height = opts.height || 260;
+  const iw = width - m.left - m.right;
+  const ih = height - m.top - m.bottom;
+  const n = times.length;
+
+  const svg = sv("svg", { viewBox: `0 0 ${width} ${height}`, role: "img" });
+  svg.setAttribute("aria-label", opts.ariaLabel || "");
+
+  let maxV = 0;
+  for (const s of series) for (const p of s.points) maxV = Math.max(maxV, p);
+  if (maxV <= 0) maxV = 1;
+
+  const tickVals = ticks(maxV, 4);
+  const yMax = Math.max(maxV, tickVals[tickVals.length - 1]);
+  const x = (i) => m.left + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const y = (v) => m.top + ih - (v / yMax) * ih;
+
+  // Gridlines: hairline, solid, recessive.
+  for (const tv of tickVals) {
+    svg.appendChild(sv("line", {
+      x1: m.left, x2: m.left + iw, y1: y(tv), y2: y(tv),
+      stroke: "var(--grid)", "stroke-width": 1,
+    }));
+    const lbl = sv("text", {
+      x: m.left - 10, y: y(tv) + 4, "text-anchor": "end",
+      fill: "var(--text-muted)", "font-size": 11, "font-variant-numeric": "tabular-nums",
+    });
+    lbl.textContent = fmtBytes(tv);
+    svg.appendChild(lbl);
+  }
+
+  // Baseline.
+  svg.appendChild(sv("line", {
+    x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih,
+    stroke: "var(--axis)", "stroke-width": 1,
+  }));
+
+  // X ticks: first, last and a couple between, never crowded.
+  const labelX = axisLabeller(times);
+  const maxTicks = Math.max(2, Math.min(6, Math.floor(iw / 90)));
+  const stepI = n <= maxTicks ? 1 : Math.ceil((n - 1) / (maxTicks - 1));
+  for (let i = 0; i < n; i += stepI) {
+    const t = sv("text", {
+      x: x(i), y: m.top + ih + 20, "text-anchor": "middle",
+      fill: "var(--text-muted)", "font-size": 11,
+    });
+    t.textContent = labelX(times[i]);
+    svg.appendChild(t);
+  }
+
+  series.forEach((s, si) => {
+    const hue = `var(--series-${(si % 6) + 1})`;
+    const pts = s.points.map((v, i) => [x(i), y(v)]);
+
+    if (singleHue && n > 1) {
+      const d = "M" + pts.map((p) => p.join(",")).join("L") +
+        `L${x(n - 1)},${m.top + ih}L${x(0)},${m.top + ih}Z`;
+      svg.appendChild(sv("path", { d, fill: hue, "fill-opacity": 0.1, stroke: "none" }));
+    }
+
+    if (n > 1) {
+      svg.appendChild(sv("path", {
+        d: "M" + pts.map((p) => p.join(",")).join("L"),
+        fill: "none", stroke: hue, "stroke-width": 2,
+        "stroke-linejoin": "round", "stroke-linecap": "round",
+      }));
+    }
+
+    // End marker: >=8px across, with a 2px surface ring so overlaps stay legible.
+    const last = pts[pts.length - 1];
+    svg.appendChild(sv("circle", {
+      cx: last[0], cy: last[1], r: 4.5, fill: hue,
+      stroke: "var(--surface-1)", "stroke-width": 2,
+    }));
+    s._endY = last[1];
+    s._hue = hue;
+  });
+
+  // Direct end labels, but only when they will not collide. Converging lines get
+  // the legend and tooltip instead of labels nudged off their own lines.
+  const labelled = series.filter((s) => s.points.some((v) => v > 0));
+  const ys = labelled.map((s) => s._endY).sort((a, b) => a - b);
+  let collides = false;
+  for (let i = 1; i < ys.length; i++) if (ys[i] - ys[i - 1] < 14) collides = true;
+
+  if (labelled.length <= 4 && !collides) {
+    for (const s of labelled) {
+      const t = sv("text", {
+        x: m.left + iw + 10, y: s._endY + 4, fill: "var(--text-secondary)",
+        "font-size": 12, "font-variant-numeric": "tabular-nums",
+      });
+      t.textContent = fmtBytes(s.points[s.points.length - 1]);
+      svg.appendChild(t);
+    }
+  }
+
+  // Crosshair + hover layer.
+  const cross = sv("line", {
+    y1: m.top, y2: m.top + ih, stroke: "var(--axis)", "stroke-width": 1, opacity: 0,
+  });
+  svg.appendChild(cross);
+  const dots = sv("g", { opacity: 0 });
+  series.forEach((s, si) => {
+    dots.appendChild(sv("circle", {
+      r: 4.5, fill: `var(--series-${(si % 6) + 1})`,
+      stroke: "var(--surface-1)", "stroke-width": 2,
+    }));
+  });
+  svg.appendChild(dots);
+
+  const hit = sv("rect", {
+    x: m.left, y: m.top, width: iw, height: ih, fill: "transparent",
+  });
+  svg.appendChild(hit);
+  host.appendChild(svg);
+
+  const tip = el("div", "tooltip");
+  host.appendChild(tip);
+
+  let active = -1;
+  function show(i) {
+    if (i < 0 || i >= n) return hide();
+    active = i;
+    cross.setAttribute("x1", x(i));
+    cross.setAttribute("x2", x(i));
+    cross.setAttribute("opacity", 1);
+    dots.setAttribute("opacity", 1);
+    Array.from(dots.children).forEach((c, si) => {
+      c.setAttribute("cx", x(i));
+      c.setAttribute("cy", y(series[si].points[i]));
+    });
+
+    tip.textContent = "";
+    const head = el("div", "tt-head", fmtDateTime(times[i]));
+    tip.appendChild(head);
+    // One tooltip lists every series at this X - no need to land on a line.
+    series.forEach((s, si) => {
+      const row = el("div", "tt-row");
+      const key = el("span", "tt-key");
+      key.style.background = `var(--series-${(si % 6) + 1})`;
+      row.appendChild(key);
+      row.appendChild(el("span", "tt-val", fmtBytes(s.points[i])));
+      if (!singleHue) row.appendChild(el("span", "tt-name", truncateStart(s.label, 34)));
+      tip.appendChild(row);
+    });
+
+    tip.dataset.show = "1";
+    const scale = (host.clientWidth || width) / width;
+    const px = x(i) * scale;
+    const tw = tip.offsetWidth;
+    tip.style.left = Math.max(0, Math.min(px + 14, (host.clientWidth || width) - tw)) + "px";
+    tip.style.top = m.top + "px";
+  }
+  function hide() {
+    active = -1;
+    cross.setAttribute("opacity", 0);
+    dots.setAttribute("opacity", 0);
+    tip.dataset.show = "0";
+  }
+
+  function indexFromEvent(ev) {
+    const box = svg.getBoundingClientRect();
+    const rel = ((ev.clientX - box.left) / box.width) * width;
+    return Math.max(0, Math.min(n - 1, Math.round(((rel - m.left) / iw) * (n - 1))));
+  }
+  hit.addEventListener("pointermove", (ev) => show(indexFromEvent(ev)));
+  hit.addEventListener("pointerleave", hide);
+
+  // Keyboard gets the same readout as hover.
+  host.tabIndex = 0;
+  host.addEventListener("focus", () => show(active < 0 ? n - 1 : active));
+  host.addEventListener("blur", hide);
+  host.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowLeft") { show(Math.max(0, (active < 0 ? n - 1 : active) - 1)); ev.preventDefault(); }
+    if (ev.key === "ArrowRight") { show(Math.min(n - 1, (active < 0 ? 0 : active) + 1)); ev.preventDefault(); }
+    if (ev.key === "Escape") hide();
+  });
+}
+
+/*
+ * Diverging horizontal bars: growth right, reclaimed left, neutral zero line.
+ * Nominal folder names, so no value ramp - the side carries the polarity and
+ * length carries the magnitude.
+ */
+function divergingBars(host, rows) {
+  const width = Math.max(host.clientWidth || 720, 320);
+  const gutter = Math.min(300, Math.max(150, Math.round(width * 0.30)));
+
+  const maxPos = Math.max(0, ...rows.map((r) => r.delta));
+  const maxNeg = Math.max(0, ...rows.map((r) => -r.delta));
+
+  // Value labels sit outside the bar end, so a lane is reserved on each side
+  // that has bars. Without the left lane a reclaimed-space label would run back
+  // into the folder names.
+  const lane = 86;
+  const leftLane = maxNeg > 0 ? lane : 0;
+  const m = { top: 8, right: maxPos > 0 ? lane + 8 : 16, bottom: 26, left: gutter + leftLane };
+  const band = 26, barH = Math.min(24, band - 2); // <=24px thick, 2px surface gap
+  const ih = rows.length * band;
+  const height = ih + m.top + m.bottom;
+  const iw = Math.max(40, width - m.left - m.right);
+  const span = (maxPos + maxNeg) || 1;
+  const zeroX = m.left + (maxNeg / span) * iw;
+  const scale = (v) => (v / span) * iw;
+
+  const svg = sv("svg", { viewBox: `0 0 ${width} ${height}`, role: "img" });
+  svg.setAttribute("aria-label", "Change in size by folder");
+
+  const tip = el("div", "tooltip");
+
+  rows.forEach((r, i) => {
+    const yTop = m.top + i * band + (band - barH) / 2;
+    const grew = r.delta >= 0;
+    const w = Math.max(1, Math.abs(scale(r.delta)));
+    const x0 = grew ? zeroX : zeroX - w;
+    const hue = grew ? "var(--grew)" : "var(--freed)";
+    const rad = Math.min(4, w);
+
+    // Rounded on the data end, square against the zero baseline.
+    const d = grew
+      ? `M${x0},${yTop}h${w - rad}a${rad},${rad} 0 0 1 ${rad},${rad}v${barH - 2 * rad}a${rad},${rad} 0 0 1 ${-rad},${rad}h${-(w - rad)}z`
+      : `M${x0 + w},${yTop}h${-(w - rad)}a${rad},${rad} 0 0 0 ${-rad},${rad}v${barH - 2 * rad}a${rad},${rad} 0 0 0 ${rad},${rad}h${w - rad}z`;
+    svg.appendChild(sv("path", { d, fill: hue }));
+
+    // Folder name in the left gutter, in ink - never in the series colour.
+    const name = sv("text", {
+      x: gutter - 12, y: yTop + barH / 2 + 4, "text-anchor": "end",
+      fill: "var(--text-primary)", "font-size": 12,
+    });
+    name.textContent = truncateStart(r.label, Math.floor((gutter - 12) / 6.4));
+    const title = sv("title");
+    title.textContent = r.path;
+    name.appendChild(title);
+    svg.appendChild(name);
+
+    // Value outside the bar end, so it is never clipped by a short bar.
+    const val = sv("text", {
+      x: grew ? x0 + w + 8 : x0 - 8, y: yTop + barH / 2 + 4,
+      "text-anchor": grew ? "start" : "end",
+      fill: "var(--text-secondary)", "font-size": 12,
+      "font-variant-numeric": "tabular-nums",
+    });
+    val.textContent = fmtSigned(r.delta);
+    svg.appendChild(val);
+
+    // Hit target spans the whole row and is at least 24px tall.
+    const hit = sv("rect", {
+      x: m.left, y: m.top + i * band, width: iw, height: band, fill: "transparent",
+    });
+    hit.style.cursor = "default";
+    const onEnter = () => {
+      tip.textContent = "";
+      tip.appendChild(el("div", "tt-head", r.path));
+      const row1 = el("div", "tt-row");
+      const key = el("span", "tt-key");
+      key.style.background = hue;
+      row1.appendChild(key);
+      row1.appendChild(el("span", "tt-val", fmtSigned(r.delta)));
+      row1.appendChild(el("span", "tt-name", grew ? "growth" : "reclaimed"));
+      tip.appendChild(row1);
+      const row2 = el("div", "tt-row");
+      row2.appendChild(el("span", "tt-val", fmtBytes(r.usage)));
+      row2.appendChild(el("span", "tt-name", "size now"));
+      tip.appendChild(row2);
+      tip.dataset.show = "1";
+      const sc = (host.clientWidth || width) / width;
+      const tw = tip.offsetWidth;
+      tip.style.left = Math.max(0, Math.min(zeroX * sc + 14, (host.clientWidth || width) - tw)) + "px";
+      tip.style.top = (m.top + i * band) * sc + "px";
+    };
+    hit.addEventListener("pointerenter", onEnter);
+    hit.addEventListener("pointerleave", () => { tip.dataset.show = "0"; });
+    svg.appendChild(hit);
+  });
+
+  // Zero line last so it sits above the fills.
+  svg.appendChild(sv("line", {
+    x1: zeroX, x2: zeroX, y1: m.top, y2: m.top + ih,
+    stroke: "var(--zero)", "stroke-width": 1,
+  }));
+
+  host.appendChild(svg);
+  host.appendChild(tip);
+}
+
+function truncateStart(s, max) {
+  if (max < 4 || s.length <= max) return s;
+  return "…" + s.slice(-(max - 1));
+}
+
+/* ---------- page assembly ---------- */
+
+function tile(label, value, sub, cls) {
+  const t = el("div", "tile" + (cls === "hero" ? " hero" : ""));
+  t.appendChild(el("div", "label", label));
+  const v = el("div", "value" + (cls === "up" ? " up" : cls === "down" ? " down" : ""), value);
+  t.appendChild(v);
+  if (sub) t.appendChild(el("div", "sub", sub));
+  return t;
+}
+
+function card(title, caption) {
+  const c = el("section", "card");
+  c.appendChild(el("h2", null, title));
+  if (caption) c.appendChild(el("p", "caption", caption));
+  return c;
+}
+
+function legendFor(series, asRect) {
+  const wrap = el("div", "legend");
+  series.forEach((s, i) => {
+    const item = el("div", "legend-item");
+    const key = el("span", "legend-key" + (asRect ? " rect" : ""));
+    key.style.background = `var(--series-${(i % 6) + 1})`;
+    item.appendChild(key);
+    item.appendChild(el("span", null, truncateStart(s.label, 46)));
+    wrap.appendChild(item);
+  });
+  return wrap;
+}
+
+function changeTable(rows) {
+  const details = el("details", "table-view");
+  const sum = el("summary", null, `Table view — all ${rows.length} changed folders`);
+  details.appendChild(sum);
+
+  const table = el("table");
+  const thead = el("thead");
+  const hr = el("tr");
+  [["Folder", ""], ["Change", "num"], ["Size now", "num"], ["State", ""]].forEach(([h, cls], idx) => {
+    const th = el("th", cls, h);
+    if (idx === 1 || idx === 2) {
+      th.setAttribute("role", "button");
+      th.tabIndex = 0;
+      const sortBy = idx === 1 ? "delta" : "usage";
+      const doSort = () => {
+        rows.sort((a, b) => Math.abs(b[sortBy]) - Math.abs(a[sortBy]));
+        details.replaceWith(changeTable(rows));
+      };
+      th.addEventListener("click", doSort);
+      th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { doSort(); e.preventDefault(); } });
+    }
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tb = el("tbody");
+  rows.forEach((r) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", "path", r.path));
+    tr.appendChild(el("td", "num", fmtSigned(r.delta)));
+    tr.appendChild(el("td", "num", fmtBytes(r.usage)));
+    const td = el("td");
+    if (r.kind) td.appendChild(el("span", "tag", r.kind));
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  details.appendChild(table);
+  return details;
+}
+
+function render() {
+  const root = currentRoot();
+  const rng = currentRange();
+  const main = document.getElementById("main");
+  main.textContent = "";
+
+  // KPI row. Exactly one hero figure.
+  const kpis = el("div", "kpis");
+  kpis.appendChild(tile("Total size", fmtBytes(rng.endTotal), root.label, "hero"));
+  if (root.baseline) {
+    kpis.appendChild(tile("Runs recorded", "1", "Trends need a second run"));
+  } else {
+    kpis.appendChild(tile(
+      "Net change · " + rng.label.toLowerCase(),
+      fmtSigned(rng.delta), fmtBytes(rng.startTotal) + " → " + fmtBytes(rng.endTotal),
+      rng.delta > 0 ? "up" : rng.delta < 0 ? "down" : null));
+    kpis.appendChild(tile("Space added", fmtBytes(rng.grew), "Across all folders that grew"));
+    kpis.appendChild(tile("Space reclaimed", fmtBytes(rng.freed), "Across all folders that shrank"));
+  }
+  main.appendChild(kpis);
+
+  if (root.baseline) {
+    const c = card("Not enough history yet",
+      "One run is recorded. Run disk-space-differ again to compare and see growth over time.");
+    main.appendChild(c);
+    return;
+  }
+
+  // Chart 1 - total over time. One series, so no legend: the title names it.
+  const c1 = card("Total size over time",
+    `${rng.runs} runs · ${fmtDate(rng.times[0])} to ${fmtDate(rng.times[rng.times.length - 1])}`);
+  const h1 = el("div", "chart-host");
+  c1.appendChild(h1);
+  main.appendChild(c1);
+  lineChart(h1, {
+    series: [{ label: root.label, points: rng.totals }],
+    times: rng.times, singleHue: true, height: 240,
+    ariaLabel: "Total size of " + root.label + " over time",
+  });
+
+  // Chart 2 - the folders driving that growth.
+  const c2 = card("Fastest growing folders",
+    rng.series.length
+      ? "Cumulative size of the folders that grew most over this range."
+      : "");
+  const h2 = el("div", "chart-host");
+  c2.appendChild(h2);
+  main.appendChild(c2);
+  if (rng.series.length) {
+    lineChart(h2, {
+      series: rng.series, times: rng.times, singleHue: false, height: 280,
+      ariaLabel: "Size over time of the fastest growing folders",
+    });
+    c2.appendChild(legendFor(rng.series, false));
+  } else {
+    h2.appendChild(el("div", "empty", "No folder grew over this range."));
+  }
+
+  // Chart 3 - who moved, and which way.
+  const c3 = card("Change by folder",
+    "Growth to the right, space reclaimed to the left. Each folder is charged only its own bytes.");
+  const h3 = el("div", "chart-host");
+  c3.appendChild(h3);
+  main.appendChild(c3);
+  if (rng.changes.length) {
+    divergingBars(h3, rng.changes);
+    c3.appendChild(changeTable(rng.changes.slice()));
+  } else {
+    h3.appendChild(el("div", "empty", "Nothing changed over this range."));
+  }
+}
+
+/* ---------- controls ---------- */
+
+function buildControls() {
+  const rootGroup = document.getElementById("root-group");
+  const sel = document.getElementById("root-select");
+  if (DATA.roots.length > 1) {
+    rootGroup.hidden = false;
+    DATA.roots.forEach((r, i) => {
+      const o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = r.label;
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", () => {
+      state.rootIdx = Number(sel.value);
+      state.rangeKey = null;
+      buildRangeSeg();
+      render();
+    });
+  }
+  buildRangeSeg();
+}
+
+function buildRangeSeg() {
+  const seg = document.getElementById("range-seg");
+  seg.textContent = "";
+  const ranges = currentRoot().ranges;
+  if (!state.rangeKey || !ranges.some((r) => r.key === state.rangeKey)) {
+    state.rangeKey = ranges[ranges.length - 1].key;
+  }
+  ranges.forEach((r) => {
+    const b = el("button", null, r.label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(r.key === state.rangeKey));
+    b.addEventListener("click", () => {
+      state.rangeKey = r.key;
+      buildRangeSeg();
+      render();
+    });
+    seg.appendChild(b);
+  });
+}
+
+/* Theme toggle wins over the OS setting, both ways. */
+const toggle = document.getElementById("theme-toggle");
+const saved = localStorage.getItem("dsd-theme");
+if (saved) document.documentElement.dataset.theme = saved;
+toggle.addEventListener("click", () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("dsd-theme", next);
+  render();
+});
+
+buildControls();
+render();
+
+let resizeTimer;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(render, 150);
+});
+</script>
+</body>
+</html>
