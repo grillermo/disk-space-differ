@@ -3,11 +3,13 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/grillermo/disk-space-differ/internal/humanize"
+	"github.com/grillermo/disk-space-differ/internal/level"
 	"github.com/grillermo/disk-space-differ/internal/model"
 )
 
@@ -20,6 +22,11 @@ const (
 	colTrend = 12
 	colSize  = 11
 	gutter   = 2
+
+	// The inspect listing trades the rank and trend columns for a proportion
+	// bar, which is what answers "which of these is the problem" at a glance.
+	colBar   = 10
+	colShare = 4
 
 	// chromeLines counts the header, summary, column headings and help bar
 	// that sit around the scrollable rows.
@@ -35,6 +42,8 @@ func (m *Model) View() string {
 		return m.viewError()
 	case stateConfirmDelete:
 		return m.viewConfirm()
+	case stateInspect:
+		return m.viewInspect()
 	default:
 		return m.viewTable()
 	}
@@ -109,14 +118,156 @@ func (m *Model) viewTable() string {
 		b.WriteString("\n  " + subtleTxt.Render("nothing changed since the last run") + "\n")
 	} else {
 		visible := m.visibleRows()
-		end := min(m.offset+visible, len(m.rows))
-		for i := m.offset; i < end; i++ {
+		end := min(m.table.offset+visible, len(m.rows))
+		for i := m.table.offset; i < end; i++ {
 			b.WriteString(m.renderRow(i, pathWidth))
 		}
 	}
 
-	b.WriteString(m.renderFooter())
+	b.WriteString(m.renderFooter(m.renderHelp()))
 	return b.String()
+}
+
+// viewInspect reads one directory as a tree instead of as a ranking: what it
+// holds, how big each part is, and how much of the directory each part accounts
+// for. It is the second deliberate exception to ranking by change rather than by
+// size, and the only screen where the numbers overlap between rows and the rows
+// inside them.
+func (m *Model) viewInspect() string {
+	var b strings.Builder
+
+	b.WriteString(m.renderHeader())
+	b.WriteString(m.renderInspectSummary())
+	b.WriteString("\n")
+
+	nameWidth := m.nameWidth()
+	b.WriteString(m.renderInspectHeadings(nameWidth))
+
+	if len(m.entries) == 0 {
+		b.WriteString("\n  " + subtleTxt.Render("nothing recorded in this folder") + "\n")
+	} else {
+		total := m.inspectUsage()
+		visible := m.visibleEntries()
+		end := min(m.browse.offset+visible, len(m.entries))
+		for i := m.browse.offset; i < end; i++ {
+			b.WriteString(m.renderEntry(i, nameWidth, total))
+		}
+	}
+
+	b.WriteString(m.renderFooter(m.renderInspectHelp()))
+	return b.String()
+}
+
+// renderInspectSummary names the directory being read and totals what it holds.
+func (m *Model) renderInspectSummary() string {
+	usage, prev := m.inspectUsage(), m.inspectPrevUsage()
+
+	var change string
+	if m.inspectBaseline() {
+		change = subtleTxt.Render("     baseline")
+	} else {
+		change = deltaStyle(usage - prev).Render(
+			lipgloss.PlaceHorizontal(colDelta, lipgloss.Right, humanize.SignedBytes(usage-prev)))
+	}
+
+	line := fmt.Sprintf("%s  %s  %s",
+		change,
+		lipgloss.NewStyle().Foreground(colHeadFG).Render(
+			pad(prettyPath(m.inspectPath()), max(18, m.nameWidth()))),
+		subtleTxt.Render(fmt.Sprintf("%s here · %d items", humanize.Bytes(usage), len(m.entries))),
+	)
+	return " " + summaryBox.Render(line) + "\n"
+}
+
+func (m *Model) renderInspectHeadings(nameWidth int) string {
+	head := strings.Join([]string{
+		padLeft("SIZE", colSize),
+		padLeft("CHANGE", colDelta),
+		pad("", colTag),
+		pad("SHARE", colBar),
+		pad("", colShare),
+		pad("HOLDS", nameWidth),
+	}, strings.Repeat(" ", gutter/2))
+
+	return " " + headerRow.Width(max(0, m.width-2)).Render(head) + "\n"
+}
+
+func (m *Model) renderEntry(i, nameWidth int, total int64) string {
+	e := m.entries[i]
+
+	size := subtleTxt.Render(padLeft(humanize.Bytes(e.Usage), colSize))
+
+	delta := e.Usage - e.PrevUsage
+	changeText := "—"
+	if delta != 0 && !m.inspectBaseline() {
+		changeText = humanize.SignedBytes(delta)
+	}
+	change := deltaStyle(delta).Render(padLeft(changeText, colDelta))
+
+	tag := pad("", colTag)
+	switch {
+	case m.deleted[e.Path] && !e.Files:
+		tag = shrankTxt.Render(pad("del", colTag))
+	case e.Kind == model.Added:
+		tag = warnTxt.Render(pad("new", colTag))
+	case e.Kind == model.Removed:
+		tag = subtleTxt.Render(pad("gone", colTag))
+	}
+
+	bar := subtleTxt.Render(shareBar(e.Usage, total, colBar))
+	share := subtleTxt.Render(padLeft(sharePercent(e.Usage, total), colShare))
+
+	nameStyle := lipgloss.NewStyle().Foreground(colHeadFG)
+	if e.Files {
+		nameStyle = subtleTxt
+	} else if m.deleted[e.Path] {
+		nameStyle = subtleTxt.Strikethrough(true)
+	}
+	name := nameStyle.Render(pad(m.entryName(e, nameWidth), nameWidth))
+
+	sep := strings.Repeat(" ", gutter/2)
+	line := strings.Join([]string{size, change, tag, bar, share, name}, sep)
+
+	if i == m.browse.cursor {
+		return " " + selectedRow.Width(max(0, m.width-2)).Render(line) + "\n"
+	}
+	return " " + line + "\n"
+}
+
+// entryName labels an entry. Directories show their own name; the file group
+// says what it stands for, spelling out the folded-in small folders when there
+// is room, because otherwise those bytes look unaccounted for.
+func (m *Model) entryName(e level.Entry, width int) string {
+	if !e.Files {
+		return filepath.Base(e.Path) + "/"
+	}
+	name := "files here"
+	note := fmt.Sprintf("  (and folders under %s)", humanize.Bytes(m.cfg.MinDirSize))
+	if width >= len(name)+len(note) {
+		return name + note
+	}
+	return name
+}
+
+// shareBar draws part as a proportion of total. Which child dominates a folder
+// is the question inspect mode exists to answer, and a column of byte counts
+// does not answer it at a glance.
+func shareBar(part, total, width int64) string {
+	if total <= 0 || part <= 0 {
+		return strings.Repeat("░", int(width))
+	}
+	filled := (part*width + total/2) / total
+	// Anything with bytes in it gets at least one block, so that a long tail of
+	// small folders is still visibly there.
+	filled = max(1, min(filled, width))
+	return strings.Repeat("█", int(filled)) + strings.Repeat("░", int(width-filled))
+}
+
+func sharePercent(part, total int64) string {
+	if total <= 0 {
+		return "0%"
+	}
+	return fmt.Sprintf("%d%%", (part*100+total/2)/total)
 }
 
 func (m *Model) renderHeader() string {
@@ -174,15 +325,34 @@ func (m *Model) renderColumnHeadings(pathWidth int) string {
 		pad("", colTag),
 		pad("TREND", colTrend),
 		padLeft("TOTAL", colSize),
-		pad("PATH", pathWidth),
+		pad(m.pathHeading(), pathWidth),
 	}, strings.Repeat(" ", gutter/2))
 
 	return " " + headerRow.Width(max(0, m.width-2)).Render(head) + "\n"
 }
 
+// pathHeading spells out the granularity on display, because the same numbers
+// mean something different one level up.
+func (m *Model) pathHeading() string {
+	// In the path view the rank column no longer counts down by size, so the
+	// heading has to say what the order actually is.
+	name := "PATH"
+	if m.view == viewByPath {
+		name = "PATH a→z"
+	}
+	if m.maxLevel <= 1 {
+		return name
+	}
+	what := "leaf folders"
+	if m.level > 1 {
+		what = fmt.Sprintf("folders holding level %d folders", m.level-1)
+	}
+	return fmt.Sprintf("%s · level %d/%d · %s", name, m.level, m.maxLevel, what)
+}
+
 func (m *Model) renderRow(i, pathWidth int) string {
 	row := m.rows[i]
-	selected := i == m.cursor
+	selected := i == m.table.cursor
 
 	rank := subtleTxt.Render(pad(fmt.Sprintf("%d", i+1), colRank))
 
@@ -226,20 +396,30 @@ func deltaText(row model.GrowthRow, view viewMode) string {
 	return humanize.SignedBytes(row.Delta)
 }
 
-func (m *Model) renderFooter() string {
+func (m *Model) renderFooter(help string) string {
 	if m.status != "" {
-		return "\n " + accentTxt.Render(m.status) + "\n" + m.renderHelp()
+		return "\n " + accentTxt.Render(m.status) + "\n" + help
 	}
-	return "\n" + m.renderHelp()
+	return "\n" + help
 }
 
 func (m *Model) renderHelp() string {
 	position := ""
 	if len(m.rows) > 0 {
-		position = fmt.Sprintf("%d/%d · ", m.cursor+1, len(m.rows))
+		position = fmt.Sprintf("%d/%d · ", m.table.cursor+1, len(m.rows))
 	}
 	return " " + helpBar.Render(position+accentTxt.Render(m.view.label())+
-		subtleTxt.Render(" · ↑↓ move · tab view · d delete · o open · r rescan · q quit")) + "\n"
+		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · ↑↓ move · ←→ level · enter inspect · tab view · d delete · o open · r rescan · q quit",
+			m.level, m.maxLevel))) + "\n"
+}
+
+func (m *Model) renderInspectHelp() string {
+	position := ""
+	if len(m.entries) > 0 {
+		position = fmt.Sprintf("%d/%d · ", m.browse.cursor+1, len(m.entries))
+	}
+	return " " + helpBar.Render(position+accentTxt.Render("inspect")+
+		subtleTxt.Render(" · ↑↓ move · enter open folder · ← back · esc leave · o reveal · q quit")) + "\n"
 }
 
 // visibleRows is how many table rows fit below the fixed chrome.
@@ -250,12 +430,56 @@ func (m *Model) visibleRows() int {
 	return max(1, m.height-chromeLines-len(m.results))
 }
 
+// visibleEntries is how many inspect rows fit. The inspect screen carries a
+// single summary line however many roots were scanned.
+func (m *Model) visibleEntries() int {
+	if m.height == 0 {
+		return 20
+	}
+	return max(1, m.height-chromeLines)
+}
+
 func (m *Model) pathWidth() int {
 	fixed := colRank + colDelta + colTag + colTrend + colSize + 5*(gutter/2) + 2
 	if m.width == 0 {
 		return 48
 	}
 	return max(16, m.width-fixed)
+}
+
+func (m *Model) nameWidth() int {
+	fixed := colSize + colDelta + colTag + colBar + colShare + 5*(gutter/2) + 2
+	if m.width == 0 {
+		return 48
+	}
+	return max(16, m.width-fixed)
+}
+
+// inspectUsage totals what the inspected directory holds. It is summed from the
+// entries rather than read off the directory, so the bar and the total can never
+// disagree with the rows above them.
+func (m *Model) inspectUsage() int64 {
+	var total int64
+	for _, e := range m.entries {
+		total += e.Usage
+	}
+	return total
+}
+
+func (m *Model) inspectPrevUsage() int64 {
+	var total int64
+	for _, e := range m.entries {
+		total += e.PrevUsage
+	}
+	return total
+}
+
+// inspectBaseline reports whether the inspected directory has a previous scan to
+// be compared against. On a first run every entry would otherwise read as having
+// grown by its whole size.
+func (m *Model) inspectBaseline() bool {
+	res, ok := m.resultFor(m.inspectPath())
+	return !ok || res.Baseline
 }
 
 // prettyPath shortens the home directory to ~, which buys back width on the

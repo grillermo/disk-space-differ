@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build the disk-space-differ binary into the repo root.
+#
+# Usage:
+#   ./build            build for this machine
+#   ./build --release  strip debug info for a smaller binary
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+binary=disk-space-differ
+flags=(-trimpath)
+
+if [[ "${1:-}" == "--release" ]]; then
+  # -s -w drop the symbol table and DWARF data; they are only useful in a debugger.
+  flags+=(-ldflags "-s -w")
+fi
+
+go build "${flags[@]}" -o "$binary" .
+
+printf '%s  (%s)\n' "./$binary" "$(du -h "$binary" | cut -f1 | tr -d ' ')"

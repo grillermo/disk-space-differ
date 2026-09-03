@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/grillermo/disk-space-differ/internal/config"
 	"github.com/grillermo/disk-space-differ/internal/model"
 	"github.com/grillermo/disk-space-differ/internal/report"
@@ -88,6 +90,55 @@ func TestGrowthViewHidesShrinkageButAllChangesShowsIt(t *testing.T) {
 	m.rebuildRows()
 	if got := m.View(); !strings.Contains(got, "-20.0 MiB") {
 		t.Error("all-changes view should list directories that shrank")
+	}
+}
+
+// The path view is an ordering, not a different ranking: it shows the rows the
+// all-changes view would show, read top to bottom as the tree reads.
+func TestByPathViewOrdersTheSameRowsAlphabetically(t *testing.T) {
+	m := testModel(t, []*report.Result{sampleResult()})
+
+	m.view = viewAllChanges
+	m.rebuildRows()
+	byChange := map[string]bool{}
+	for _, row := range m.rows {
+		byChange[row.Path] = true
+	}
+
+	m.view = viewByPath
+	m.rebuildRows()
+
+	if len(m.rows) != len(byChange) {
+		t.Fatalf("path view has %d rows, want the %d the all-changes view has", len(m.rows), len(byChange))
+	}
+	for _, row := range m.rows {
+		if !byChange[row.Path] {
+			t.Errorf("%s appears in the path view but not in all changes", row.Path)
+		}
+	}
+	for i := 1; i < len(m.rows); i++ {
+		if m.rows[i-1].Path > m.rows[i].Path {
+			t.Errorf("rows out of path order: %s before %s", m.rows[i-1].Path, m.rows[i].Path)
+		}
+	}
+	if !strings.Contains(m.View(), "a→z") {
+		t.Error("the table should say it is ordered by path")
+	}
+}
+
+// tab must reach every view and come back round.
+func TestTabCyclesThroughEveryViewAndWrapsAround(t *testing.T) {
+	m := testModel(t, []*report.Result{sampleResult()})
+
+	var seen []string
+	for range int(viewCount) {
+		press(m, tea.KeyTab)
+		seen = append(seen, m.view.label())
+	}
+
+	want := []string{"all changes", "largest", "by path", "growth"}
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Errorf("tab cycled through %v, want %v", seen, want)
 	}
 }
 

@@ -7,22 +7,55 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/grillermo/disk-space-differ/internal/config"
+	"github.com/grillermo/disk-space-differ/internal/level"
 	"github.com/grillermo/disk-space-differ/internal/model"
 	"github.com/grillermo/disk-space-differ/internal/report"
 	"github.com/grillermo/disk-space-differ/internal/scan"
 	"github.com/grillermo/disk-space-differ/internal/store"
 )
 
+// scroll is a cursor and the viewport offset that follows it through a list.
+type scroll struct {
+	cursor int
+	offset int
+}
+
+func (s *scroll) reset() { s.cursor, s.offset = 0, 0 }
+
+func (s *scroll) move(delta, n, visible int) {
+	if n == 0 {
+		return
+	}
+	s.cursor += delta
+	s.clamp(n, visible)
+}
+
+func (s *scroll) clamp(n, visible int) {
+	s.cursor = clampInt(s.cursor, 0, max(0, n-1))
+	if visible <= 0 {
+		return
+	}
+	if s.cursor < s.offset {
+		s.offset = s.cursor
+	}
+	if s.cursor >= s.offset+visible {
+		s.offset = s.cursor - visible + 1
+	}
+	s.offset = clampInt(s.offset, 0, max(0, n-visible))
+}
+
 type state int
 
 const (
 	stateScanning state = iota
 	stateTable
+	stateInspect
 	stateConfirmDelete
 	stateError
 )
@@ -33,6 +66,10 @@ const (
 	viewGrowth viewMode = iota
 	viewAllChanges
 	viewLargest
+	viewByPath
+
+	// viewCount is not a view; it is how many there are to cycle through.
+	viewCount
 )
 
 func (v viewMode) label() string {
@@ -41,6 +78,8 @@ func (v viewMode) label() string {
 		return "all changes"
 	case viewLargest:
 		return "largest"
+	case viewByPath:
+		return "by path"
 	default:
 		return "growth"
 	}
@@ -74,8 +113,21 @@ type Model struct {
 	results []*report.Result
 	rows    []model.GrowthRow
 
-	cursor int
-	offset int
+	// level is the tree level on display, 1 being the leaf directories. maxLevel
+	// is how far up the scanned trees reach.
+	level    int
+	maxLevel int
+
+	// inspect is the trail of directories opened in inspect mode, the last one
+	// being on display; entries is what it holds. Empty outside inspect mode.
+	inspect []string
+	entries []level.Entry
+
+	// The table and the inspect listing keep their own cursors, so that leaving
+	// a directory puts you back on the row you opened it from.
+	table  scroll
+	browse scroll
+
 	width  int
 	height int
 
@@ -98,13 +150,15 @@ func New(cfg config.Config, st *store.Store) *Model {
 	sp.Style = accentTxt
 
 	return &Model{
-		cfg:     cfg,
-		store:   st,
-		roots:   cfg.ResolvedRoots(),
-		state:   stateScanning,
-		view:    viewGrowth,
-		spinner: sp,
-		deleted: map[string]bool{},
+		cfg:      cfg,
+		store:    st,
+		roots:    cfg.ResolvedRoots(),
+		state:    stateScanning,
+		view:     viewGrowth,
+		level:    1,
+		maxLevel: 1,
+		spinner:  sp,
+		deleted:  map[string]bool{},
 	}
 }
 
@@ -162,8 +216,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanDoneMsg:
 		m.results = msg.results
+		// A rescan replaces the tree the inspect trail was reading, so it starts
+		// again from the fresh table rather than from stale contents.
+		m.inspect, m.entries = nil, nil
 		m.state = stateTable
-		m.cursor, m.offset = 0, 0
+		m.table.reset()
+		m.browse.reset()
 		m.rebuildRows()
 		return m, nil
 
@@ -194,8 +252,12 @@ func (m *Model) handleDeleted(msg deletedMsg) tea.Cmd {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
-	if m.state == stateConfirmDelete {
+	// Inspect mode owns esc, which everywhere else quits the program.
+	switch m.state {
+	case stateConfirmDelete:
 		return m.handleConfirmKey(msg)
+	case stateInspect:
+		return m.handleInspectKey(msg)
 	}
 
 	switch msg.String() {
@@ -218,14 +280,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "pgdown", "ctrl+d":
 		m.moveCursor(m.visibleRows())
 	case "home", "g":
-		m.cursor, m.offset = 0, 0
+		m.table.reset()
 	case "end", "G":
-		m.cursor = len(m.rows) - 1
-		m.clampScroll()
+		m.moveCursor(len(m.rows))
+	case "enter":
+		m.beginInspect()
 	case "tab":
-		m.view = (m.view + 1) % 3
-		m.cursor, m.offset = 0, 0
+		m.view = (m.view + 1) % viewCount
+		m.table.reset()
 		m.rebuildRows()
+	case "left", "h":
+		m.setLevel(m.level + 1)
+	case "right", "l":
+		m.setLevel(m.level - 1)
 	case "r":
 		m.state = stateScanning
 		m.progress = scan.Progress{}
@@ -251,6 +318,159 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 		m.status = "delete cancelled"
 		return nil
 	}
+}
+
+func (m *Model) handleInspectKey(msg tea.KeyMsg) tea.Cmd {
+	m.status = ""
+	visible := m.visibleEntries()
+
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return tea.Quit
+	case "esc":
+		m.leaveInspect()
+	case "up", "k":
+		m.browse.move(-1, len(m.entries), visible)
+	case "down", "j":
+		m.browse.move(1, len(m.entries), visible)
+	case "pgup", "ctrl+u":
+		m.browse.move(-visible, len(m.entries), visible)
+	case "pgdown", "ctrl+d":
+		m.browse.move(visible, len(m.entries), visible)
+	case "home", "g":
+		m.browse.reset()
+	case "end", "G":
+		m.browse.move(len(m.entries), len(m.entries), visible)
+	case "enter", "right", "l":
+		m.descend()
+	case "left", "h", "backspace":
+		m.ascend()
+	case "o":
+		if entry, ok := m.selectedEntry(); ok {
+			m.status = "opened " + prettyPath(entry.Path)
+			return openInFileManager(entry.Path)
+		}
+	}
+	return nil
+}
+
+// beginInspect opens the selected row as a directory, listing what it holds
+// rather than what changed in it.
+func (m *Model) beginInspect() {
+	row, ok := m.selectedRow()
+	if !ok {
+		return
+	}
+	if !m.enterDir(row.Path) {
+		m.status = "nothing recorded inside " + prettyPath(row.Path)
+		return
+	}
+	m.state = stateInspect
+}
+
+func (m *Model) leaveInspect() {
+	m.state = stateTable
+	m.inspect, m.entries = nil, nil
+	m.status = ""
+}
+
+// descend opens the selected subdirectory. The file group stands for bytes, not
+// for a directory, so there is nothing below it to open.
+func (m *Model) descend() {
+	entry, ok := m.selectedEntry()
+	if !ok {
+		return
+	}
+	if entry.Files {
+		m.status = "that row is this folder's own files, not a folder"
+		return
+	}
+	if !m.enterDir(entry.Path) {
+		m.status = "nothing recorded inside " + prettyPath(entry.Path)
+	}
+}
+
+// ascend goes back the way we came in, landing on the row that was opened.
+// Leaving the directory inspect mode started at leaves inspect mode, since there
+// is nothing further back to return to.
+func (m *Model) ascend() {
+	if len(m.inspect) <= 1 {
+		m.leaveInspect()
+		return
+	}
+
+	came := m.inspect[len(m.inspect)-1]
+	m.inspect = m.inspect[:len(m.inspect)-1]
+	entries, ok := m.contentsOf(m.inspectPath())
+	if !ok {
+		m.leaveInspect()
+		return
+	}
+
+	m.entries = entries
+	m.browse.reset()
+	for i, e := range entries {
+		if !e.Files && e.Path == came {
+			m.browse.move(i, len(entries), m.visibleEntries())
+			break
+		}
+	}
+}
+
+// enterDir pushes path onto the inspect trail, reporting whether it had anything
+// recorded to show.
+func (m *Model) enterDir(path string) bool {
+	entries, ok := m.contentsOf(path)
+	if !ok || len(entries) == 0 {
+		return false
+	}
+	m.inspect = append(m.inspect, path)
+	m.entries = entries
+	m.browse.reset()
+	return true
+}
+
+// inspectPath is the directory currently on display in inspect mode.
+func (m *Model) inspectPath() string {
+	if len(m.inspect) == 0 {
+		return ""
+	}
+	return m.inspect[len(m.inspect)-1]
+}
+
+func (m *Model) selectedEntry() (level.Entry, bool) {
+	if m.browse.cursor < 0 || m.browse.cursor >= len(m.entries) {
+		return level.Entry{}, false
+	}
+	return m.entries[m.browse.cursor], true
+}
+
+// contentsOf reads a directory out of whichever scanned root holds it.
+func (m *Model) contentsOf(path string) ([]level.Entry, bool) {
+	res, ok := m.resultFor(path)
+	if !ok {
+		return nil, false
+	}
+	return res.Contents(path)
+}
+
+// resultFor finds the scan covering path, preferring the deepest root when one
+// scanned root sits inside another.
+func (m *Model) resultFor(path string) (*report.Result, bool) {
+	var best *report.Result
+	for _, res := range m.results {
+		if !underRoot(path, res.Root) {
+			continue
+		}
+		if best == nil || len(res.Root) > len(best.Root) {
+			best = res
+		}
+	}
+	return best, best != nil
+}
+
+func underRoot(path, root string) bool {
+	return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, "/")+"/")
 }
 
 // beginDelete opens the confirmation screen, refusing targets that would be
@@ -304,81 +524,86 @@ func (m *Model) openCmd() tea.Cmd {
 }
 
 func (m *Model) moveCursor(delta int) {
-	if len(m.rows) == 0 {
-		return
-	}
-	m.cursor = clampInt(m.cursor+delta, 0, len(m.rows)-1)
-	m.clampScroll()
+	m.table.move(delta, len(m.rows), m.visibleRows())
 }
 
+// clampScroll keeps both listings inside their contents after a resize.
 func (m *Model) clampScroll() {
-	visible := m.visibleRows()
-	if visible <= 0 {
-		return
-	}
-	if m.cursor < m.offset {
-		m.offset = m.cursor
-	}
-	if m.cursor >= m.offset+visible {
-		m.offset = m.cursor - visible + 1
-	}
-	maxOffset := max(0, len(m.rows)-visible)
-	m.offset = clampInt(m.offset, 0, maxOffset)
+	m.table.clamp(len(m.rows), m.visibleRows())
+	m.browse.clamp(len(m.entries), m.visibleEntries())
 }
 
 func (m *Model) selectedRow() (model.GrowthRow, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.rows) {
+	if m.table.cursor < 0 || m.table.cursor >= len(m.rows) {
 		return model.GrowthRow{}, false
 	}
-	return m.rows[m.cursor], true
+	return m.rows[m.table.cursor], true
 }
 
-// rebuildRows merges every root's rows into a single ranking for the current view.
+// setLevel moves the report up or down the tree, staying inside the levels the
+// scanned trees actually have.
+func (m *Model) setLevel(lvl int) {
+	lvl = clampInt(lvl, 1, max(1, m.maxLevel))
+	if lvl == m.level {
+		return
+	}
+	m.level = lvl
+	m.table.reset()
+	m.rebuildRows()
+}
+
+// refreshLevels recomputes how far up the tree the report can be read, keeping
+// the selected level inside it after a rescan.
+func (m *Model) refreshLevels() {
+	m.maxLevel = 1
+	for _, res := range m.results {
+		m.maxLevel = max(m.maxLevel, res.MaxLevel())
+	}
+	m.level = clampInt(max(1, m.level), 1, m.maxLevel)
+}
+
+// rebuildRows merges every root's rows into a single ranking for the current
+// view at the current level.
 func (m *Model) rebuildRows() {
+	m.refreshLevels()
+
+	// Each root is asked for enough rows that no single root can crowd the
+	// others out of the merged ranking.
+	budget := m.cfg.Top*len(m.results) + m.cfg.Top
+
 	var all []model.GrowthRow
 	for _, res := range m.results {
 		switch m.view {
 		case viewLargest:
-			all = append(all, largestRows(res)...)
-		case viewAllChanges:
-			all = append(all, res.Changes(m.cfg.Top*len(m.results)+m.cfg.Top)...)
+			all = append(all, res.Largest(m.level, budget)...)
+		case viewAllChanges, viewByPath:
+			all = append(all, res.Changes(m.level, budget)...)
 		default:
-			all = append(all, res.Growth(m.cfg.Top*len(m.results)+m.cfg.Top)...)
+			all = append(all, res.Growth(m.level, budget)...)
 		}
 	}
 
-	if m.view == viewLargest {
-		sort.Slice(all, func(i, j int) bool { return all[i].Delta > all[j].Delta })
-	} else {
-		sort.Slice(all, func(i, j int) bool {
-			a, b := absInt64(all[i].Delta), absInt64(all[j].Delta)
-			if a != b {
-				return a > b
-			}
-			return all[i].Path < all[j].Path
-		})
-	}
+	sort.Slice(all, func(i, j int) bool {
+		a, b := absInt64(all[i].Delta), absInt64(all[j].Delta)
+		if a != b {
+			return a > b
+		}
+		return all[i].Path < all[j].Path
+	})
 
 	if len(all) > m.cfg.Top {
 		all = all[:m.cfg.Top]
 	}
-	m.rows = all
-	m.cursor = clampInt(m.cursor, 0, max(0, len(m.rows)-1))
-	m.clampScroll()
-}
 
-// largestRows ranks by bytes held directly, so a big directory does not drag
-// its whole chain of ancestors into the list alongside it.
-func largestRows(res *report.Result) []model.GrowthRow {
-	rows := make([]model.GrowthRow, 0, len(res.Current.Dirs))
-	for _, d := range res.Current.Dirs {
-		rows = append(rows, model.GrowthRow{Path: d.Path, Delta: d.SelfUsage, Usage: d.Usage})
+	// Which rows make the cut is still decided by change; the path view only
+	// reorders the survivors. Selecting alphabetically instead would fill the
+	// table with whatever happens to sort first, which nobody asked to see.
+	if m.view == viewByPath {
+		sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Delta > rows[j].Delta })
-	if len(rows) > 200 {
-		rows = rows[:200]
-	}
-	return rows
+
+	m.rows = all
+	m.clampScroll()
 }
 
 func clampInt(v, lo, hi int) int {

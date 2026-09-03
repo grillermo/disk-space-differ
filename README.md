@@ -11,13 +11,13 @@ every week is.
  disk-space-differ                                       compared with 3d ago
       +4.21 GiB  ~                    77.0 GiB total · 2,388,362 items · 28.9s
 
- #           GROWTH      TREND              TOTAL PATH
+ #           GROWTH      TREND              TOTAL PATH · level 1/9 · leaf folders
  ─────────────────────────────────────────────────────────────────────────────
  1        +2.31 GiB      ▁▁▂▃▅█          4.10 GiB ~/Library/Caches/Homebrew
  2        +1.02 GiB new  ▁▁▁▁▁█          1.02 GiB ~/c/app/node_modules
  3         +512 MiB      ▁▂▃▄▅█           980 MiB ~/Library/Caches/go-build
 
- 1/20 · growth · ↑↓ move · tab view · d delete · o open · r rescan · q quit
+ 1/40 · growth · level 1/9 · ↑↓ move · ←→ level · tab view · d delete · q quit
 ```
 
 ## Install
@@ -44,7 +44,10 @@ disk-space-differ --init-config   # write a default config file
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `tab` | cycle view: growth → all changes → largest |
+| `←` / `h` | up a tree level (coarser) |
+| `→` / `l` | down a tree level (finer) |
+| `enter` | inspect the selected directory (see below) |
+| `tab` | cycle view: growth → all changes → largest → by path |
 | `d` | delete the selected directory (asks first) |
 | `o` | reveal in the file manager |
 | `r` | rescan |
@@ -52,6 +55,70 @@ disk-space-differ --init-config   # write a default config file
 
 The first run has nothing to compare against, so it records a baseline and lists
 the directories holding the most space. Growth appears from the second run on.
+
+## Levels
+
+`←` and `→` change how coarsely the same scan is read, without rescanning: `←`
+moves up the tree towards the root, `→` back down towards the files.
+
+Levels are counted **from the leaves up**, not from the root down:
+
+- **Level 1** — folders holding no other folder. Where the bytes actually sit.
+- **Level 2** — folders holding one or more level 1 folders.
+- **Level 3** — folders holding one or more level 2 folders, and so on up to the
+  scan root, which is the highest level there is.
+
+Counting from the leaves is what makes the levels comparable across branches of
+different lengths. `~/Library` is nine folders deep and `~/Downloads` is one, so
+"three folders down from the root" means nothing in common between them, while
+"three levels up from the files" always means the same kind of thing.
+
+Level 1 tells you *what* grew; the levels above tell you *whose fault it is*. Two
+hundred packages each adding 4 MB is invisible at level 1 and a single 800 MB row
+at level 3.
+
+Moving up a level never changes the total. Growth is re-charged to the folder
+representing each row at that level, so the numbers on screen always still sum to
+the root's change — the same conservation invariant that governs level 1. A
+folder whose subtree churned but whose size did not move drops off the list at
+every level, which is the whole point of ranking by change rather than size.
+
+`--level N` does the same thing for `--plain` and `--json`.
+
+## Inspecting a folder
+
+The report tells you *which* folder grew. `enter` opens it to show *what it is
+made of*, from the same scan — no rescan, no waiting.
+
+```
+             0 B  ~/Library/Caches                     4.21 GiB here · 4 items
+
+        SIZE        CHANGE      SHARE           HOLDS
+ ─────────────────────────────────────────────────────────────────────────────
+    2.40 GiB     +1.80 GiB      ██████░░░░  57% Homebrew/
+    1.31 GiB       +112 MiB     ███░░░░░░░  31% go-build/
+     404 MiB new     +404 MiB   █░░░░░░░░░  10% typescript/
+    98.0 MiB          -4.0 MiB  █░░░░░░░░░   2% files here  (and folders under 1.00 MiB)
+
+ 1/4 · inspect · ↑↓ move · enter open folder · ← back · esc leave · o reveal · q quit
+```
+
+| Key | Action |
+|---|---|
+| `enter` / `→` | open the selected subfolder |
+| `←` / `backspace` | back to the folder above |
+| `esc` | leave inspect mode |
+
+Files are shown **as one group**, not listed individually: the point is to find
+which subfolder holds the space, and a folder holding ten thousand files is not
+made clearer by ten thousand rows. The `files here` row also carries the
+subfolders too small to have been recorded (1 MiB by default), so the rows always
+add up to the whole folder — which is what makes the `SHARE` column meaningful.
+
+A subfolder deleted since the previous scan stays on the list, showing what it
+used to hold. Sizes here are cumulative and overlap with the rows inside them:
+this is the one screen that answers "what is in here" rather than "what changed",
+so it is read one folder at a time and never summed across levels.
 
 ## How growth is attributed
 
@@ -127,7 +194,7 @@ Written to `~/.config/disk-space-differ/config.json` by `--init-config`:
   "ignore_paths": [],
   "min_dir_size": 1048576,
   "retention": 30,
-  "top": 20,
+  "top": 40,
   "follow_symlinks": false,
   "database_path": "/Users/you/.local/share/disk-space-differ/snapshots.db"
 }
@@ -141,6 +208,7 @@ Written to `~/.config/disk-space-differ/config.json` by `--init-config`:
 - **`retention`** — snapshots kept per root. A home directory snapshot is
   roughly 4 MB, so the default of 30 costs about 130 MB. Lower it, or raise
   `min_dir_size`, if that bothers you.
+- **`top`** — how many rows the report shows.
 - **`follow_symlinks`** — off by default, because following links double counts
   targets and can cycle.
 
@@ -177,5 +245,5 @@ directory and `/` are refused outright.
 go test ./...
 ```
 
-The diff attribution, storage round-trip, scanner invariants and TUI rendering
-are all covered.
+The diff attribution, level folding, storage round-trip, scanner invariants and
+TUI rendering are all covered.

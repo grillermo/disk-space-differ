@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,6 +191,32 @@ func (s *Store) History(root string, paths []string, limit int) (map[string][]in
 		order = append(order, snaps[i].ID)
 	}
 
+	slot := make(map[int64]int, len(order))
+	for i, id := range order {
+		slot[id] = i
+	}
+
+	out := make(map[string][]int64, len(paths))
+	for _, p := range paths {
+		out[p] = make([]int64, len(order))
+	}
+
+	// Callers ask about every level of the tree at once, which can run to
+	// thousands of paths. SQLite caps how many bind parameters one statement may
+	// carry, so the paths go in batches rather than one enormous IN list.
+	for batch := range chunks(paths, historyBatch) {
+		if err := s.fillHistory(batch, order, slot, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// historyBatch is how many paths one history query binds at a time, well inside
+// any SQLite build's parameter limit.
+const historyBatch = 400
+
+func (s *Store) fillHistory(paths []string, order []int64, slot map[int64]int, out map[string][]int64) error {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(paths)), ",")
 	snapPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(order)), ",")
 	args := make([]any, 0, len(paths)+len(order))
@@ -206,19 +233,10 @@ func (s *Store) History(root string, paths []string, limit int) (map[string][]in
 	)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
-	slot := make(map[int64]int, len(order))
-	for i, id := range order {
-		slot[id] = i
-	}
-
-	out := make(map[string][]int64, len(paths))
-	for _, p := range paths {
-		out[p] = make([]int64, len(order))
-	}
 	for rows.Next() {
 		var (
 			path       string
@@ -226,13 +244,24 @@ func (s *Store) History(root string, paths []string, limit int) (map[string][]in
 			usage      int64
 		)
 		if err := rows.Scan(&path, &snapshotID, &usage); err != nil {
-			return nil, err
+			return err
 		}
 		if series, ok := out[path]; ok {
 			series[slot[snapshotID]] = usage
 		}
 	}
-	return out, rows.Err()
+	return rows.Err()
+}
+
+func chunks(paths []string, size int) iter.Seq[[]string] {
+	return func(yield func([]string) bool) {
+		for start := 0; start < len(paths); start += size {
+			end := min(start+size, len(paths))
+			if !yield(paths[start:end]) {
+				return
+			}
+		}
+	}
 }
 
 // Prune keeps the newest keep snapshots for root and deletes the rest.

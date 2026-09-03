@@ -8,6 +8,7 @@ import (
 
 	"github.com/grillermo/disk-space-differ/internal/config"
 	"github.com/grillermo/disk-space-differ/internal/diff"
+	"github.com/grillermo/disk-space-differ/internal/level"
 	"github.com/grillermo/disk-space-differ/internal/model"
 	"github.com/grillermo/disk-space-differ/internal/scan"
 	"github.com/grillermo/disk-space-differ/internal/store"
@@ -16,9 +17,9 @@ import (
 // historyDepth is how many past snapshots feed the trend sparkline.
 const historyDepth = 12
 
-// annotated is how many rows get a trend series attached. Ranking only needs
-// the deltas, so the history query is limited to the rows that can plausibly be
-// displayed rather than every directory on disk.
+// annotated is how many rows per level get a trend series attached. Ranking only
+// needs the deltas, so the history query is limited to the rows that can
+// plausibly be displayed rather than every directory on disk.
 const annotated = 200
 
 // Result is one root's outcome for a single run.
@@ -27,12 +28,18 @@ type Result struct {
 	Current  *model.Snapshot
 	Previous *model.Snapshot
 
-	// Rows are every attributed change, largest absolute change first.
+	// Rows are every attributed change at level 1, largest absolute change first.
 	Rows []model.GrowthRow
 
 	// Baseline is true when this run had nothing to compare against. Rows then
 	// rank directories by the space they hold rather than by growth.
 	Baseline bool
+
+	// Levels and the caches below are built on first use rather than in Run, so
+	// that a Result assembled by hand still answers level queries.
+	levels  *level.Index
+	changes map[int][]model.GrowthRow
+	sizes   map[int][]model.GrowthRow
 }
 
 // TotalDelta is how much the root grew since the previous run.
@@ -43,11 +50,71 @@ func (r *Result) TotalDelta() int64 {
 	return r.Current.TotalUsage - r.Previous.TotalUsage
 }
 
-// Growth returns the n rows that grew the most.
-func (r *Result) Growth(n int) []model.GrowthRow { return diff.TopGrowth(r.Rows, n) }
+// Growth returns the n directories at lvl that grew the most.
+func (r *Result) Growth(lvl, n int) []model.GrowthRow { return diff.TopGrowth(r.RowsAt(lvl), n) }
 
-// Changes returns the n largest changes in either direction.
-func (r *Result) Changes(n int) []model.GrowthRow { return diff.TopChanges(r.Rows, n) }
+// Changes returns the n largest changes at lvl in either direction.
+func (r *Result) Changes(lvl, n int) []model.GrowthRow { return diff.TopChanges(r.RowsAt(lvl), n) }
+
+// Largest returns the n directories at lvl holding the most space. Ranking is by
+// the bytes charged to each directory, so a big directory does not drag its
+// whole chain of ancestors into the list alongside it.
+func (r *Result) Largest(lvl, n int) []model.GrowthRow {
+	return head(r.SizesAt(lvl), n)
+}
+
+// Contents lists what dir holds directly, for reading one directory as a tree
+// instead of as a row in a ranking. See level.Index.Contents: these sizes are
+// cumulative and overlap, unlike the deltas everything else here reports.
+func (r *Result) Contents(dir string) ([]level.Entry, bool) {
+	return r.levelIndex().Contents(dir)
+}
+
+// MaxLevel is the coarsest level available, the level of the scan root itself.
+func (r *Result) MaxLevel() int { return r.levelIndex().Max() }
+
+// RowsAt returns every attributed change folded onto lvl.
+func (r *Result) RowsAt(lvl int) []model.GrowthRow {
+	if lvl <= 1 {
+		return r.Rows
+	}
+	if cached, ok := r.changes[lvl]; ok {
+		return cached
+	}
+	rows := r.levelIndex().Aggregate(r.Rows, lvl)
+	if r.changes == nil {
+		r.changes = map[int][]model.GrowthRow{}
+	}
+	r.changes[lvl] = rows
+	return rows
+}
+
+// SizesAt returns the directories at lvl ranked by the space charged to them.
+func (r *Result) SizesAt(lvl int) []model.GrowthRow {
+	if cached, ok := r.sizes[lvl]; ok {
+		return cached
+	}
+	rows := r.levelIndex().Sizes(lvl)
+	if r.sizes == nil {
+		r.sizes = map[int][]model.GrowthRow{}
+	}
+	r.sizes[lvl] = rows
+	return rows
+}
+
+func (r *Result) levelIndex() *level.Index {
+	if r.levels == nil {
+		r.levels = level.Build(dirsOf(r.Current), dirsOf(r.Previous))
+	}
+	return r.levels
+}
+
+func dirsOf(snap *model.Snapshot) []model.DirStat {
+	if snap == nil {
+		return nil
+	}
+	return snap.Dirs
+}
 
 // Run scans root, stores the snapshot, and reports what changed since the
 // previous run of the same root.
@@ -88,7 +155,7 @@ func Run(
 		})
 	}
 
-	if err := attachHistory(st, root, res.Rows); err != nil {
+	if err := attachHistory(st, root, res); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -130,25 +197,55 @@ func baselineRows(dirs []model.DirStat) []model.GrowthRow {
 	return rows
 }
 
-func attachHistory(st *store.Store, root string, rows []model.GrowthRow) error {
-	limit := min(len(rows), annotated)
-	if limit == 0 {
-		return nil
+// attachHistory gives every level's displayable rows a usage series for the
+// trend sparkline.
+//
+// All levels are annotated up front because the level being viewed is chosen
+// after the scan has finished, and rescanning a home directory just to fill in a
+// sparkline would be absurd. Each level's own rows are annotated in place, so
+// the caches keep the series; the ranking helpers copy rows and would not.
+func attachHistory(st *store.Store, root string, res *Result) error {
+	sets := make([][]model.GrowthRow, 0, 2*res.MaxLevel())
+	for lvl := 1; lvl <= res.MaxLevel(); lvl++ {
+		sets = append(sets,
+			head(res.RowsAt(lvl), annotated),
+			head(res.SizesAt(lvl), annotated),
+		)
 	}
 
-	paths := make([]string, limit)
-	for i := range paths {
-		paths[i] = rows[i].Path
+	seen := map[string]bool{}
+	var paths []string
+	for _, set := range sets {
+		for _, row := range set {
+			if !seen[row.Path] {
+				seen[row.Path] = true
+				paths = append(paths, row.Path)
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return nil
 	}
 
 	hist, err := st.History(root, paths, historyDepth)
 	if err != nil {
 		return fmt.Errorf("loading history: %w", err)
 	}
-	for i := range rows[:limit] {
-		rows[i].History = hist[rows[i].Path]
+	for _, set := range sets {
+		for i := range set {
+			set[i].History = hist[set[i].Path]
+		}
 	}
 	return nil
+}
+
+// head returns the first n rows, sharing storage with rows so that annotating
+// the result annotates the original.
+func head(rows []model.GrowthRow, n int) []model.GrowthRow {
+	if n > 0 && len(rows) > n {
+		return rows[:n]
+	}
+	return rows
 }
 
 func absInt64(v int64) int64 {

@@ -45,6 +45,7 @@ func run() error {
 		configPath = flag.String("config", config.DefaultPath(), "path to the config file")
 		dbPath     = flag.String("db", "", "path to the snapshot database (overrides config)")
 		top        = flag.Int("top", 0, "how many directories to report (overrides config)")
+		lvl        = flag.Int("level", 1, "tree level to report: 1 is leaf folders, 2 is the folders holding them, and so on")
 		plain      = flag.Bool("plain", false, "print the report and exit instead of opening the TUI")
 		asJSON     = flag.Bool("json", false, "print the report as JSON and exit")
 		htmlPath   = flag.String("html", "", "write an HTML report with charts to this path")
@@ -100,7 +101,7 @@ func run() error {
 		return runHTML(cfg, st, *htmlPath, *noScan, *openAfter)
 	}
 	if *plain || *asJSON {
-		return runPlain(cfg, st, *asJSON)
+		return runPlain(cfg, st, *asJSON, max(1, *lvl))
 	}
 	return runTUI(cfg, st)
 }
@@ -187,7 +188,7 @@ func runTUI(cfg config.Config, st *store.Store) error {
 
 // runPlain produces the same report without the interactive layer, for cron
 // jobs and shell pipelines.
-func runPlain(cfg config.Config, st *store.Store, asJSON bool) error {
+func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -204,13 +205,13 @@ func runPlain(cfg config.Config, st *store.Store, asJSON bool) error {
 	}
 
 	if asJSON {
-		return printJSON(results, cfg.Top)
+		return printJSON(results, lvl, cfg.Top)
 	}
-	printText(results, cfg.Top)
+	printText(results, lvl, cfg.Top)
 	return nil
 }
 
-func printText(results []*report.Result, top int) {
+func printText(results []*report.Result, lvl, top int) {
 	for _, res := range results {
 		fmt.Printf("\n%s\n", res.Root)
 
@@ -233,10 +234,10 @@ func printText(results []*report.Result, top int) {
 				res.Current.Unreadable)
 		}
 		if !res.Baseline {
-			fmt.Printf("  top %d by growth:\n", top)
+			fmt.Printf("  top %d by growth at level %d of %d:\n", top, min(lvl, res.MaxLevel()), res.MaxLevel())
 		}
 
-		rows := res.Growth(top)
+		rows := res.Growth(lvl, top)
 		if len(rows) == 0 {
 			fmt.Println("    (nothing grew)")
 			continue
@@ -265,6 +266,8 @@ type jsonRow struct {
 type jsonResult struct {
 	Root       string    `json:"root"`
 	Baseline   bool      `json:"baseline"`
+	Level      int       `json:"level"`
+	MaxLevel   int       `json:"max_level"`
 	ScannedAt  string    `json:"scanned_at"`
 	DurationMS int64     `json:"duration_ms"`
 	TotalUsage int64     `json:"total_usage"`
@@ -273,19 +276,21 @@ type jsonResult struct {
 	Rows       []jsonRow `json:"rows"`
 }
 
-func printJSON(results []*report.Result, top int) error {
+func printJSON(results []*report.Result, lvl, top int) error {
 	out := make([]jsonResult, 0, len(results))
 	for _, res := range results {
 		jr := jsonResult{
 			Root:       res.Root,
 			Baseline:   res.Baseline,
+			Level:      min(lvl, res.MaxLevel()),
+			MaxLevel:   res.MaxLevel(),
 			ScannedAt:  res.Current.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
 			DurationMS: res.Current.Duration.Milliseconds(),
 			TotalUsage: res.Current.TotalUsage,
 			TotalDelta: res.TotalDelta(),
 			ItemCount:  res.Current.ItemCount,
 		}
-		for _, row := range res.Growth(top) {
+		for _, row := range res.Growth(lvl, top) {
 			jr.Rows = append(jr.Rows, jsonRow{
 				Path:         row.Path,
 				Delta:        row.Delta,

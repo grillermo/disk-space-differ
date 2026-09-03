@@ -45,7 +45,7 @@ func Default() Config {
 		IgnorePaths:    []string{},
 		MinDirSize:     scan.DefaultMinDirSize,
 		Retention:      store.DefaultRetention,
-		Top:            20,
+		Top:            40,
 		FollowSymlinks: false,
 		DatabasePath:   store.DefaultPath(),
 	}
