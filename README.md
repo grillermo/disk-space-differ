@@ -39,7 +39,7 @@ disk-space-differ --no-scan       # open the stored scans, instantly
 disk-space-differ --scans 10      # compare across the last ten scans
 disk-space-differ --plain         # print and exit (for cron)
 disk-space-differ --json          # machine-readable output
-disk-space-differ --html report.html --open   # charted HTML report
+disk-space-differ --report         # charted HTML report, opened in the browser
 disk-space-differ --init-config   # write a default config file
 ```
 
@@ -78,7 +78,7 @@ and says so.
 
 `--no-scan` skips scanning entirely and reports the scans already in the
 database, so it opens instantly and works with `--plain`, `--json` and
-`--html` too. It records nothing, so the same command keeps giving the same
+`--report` too. It records nothing, so the same command keeps giving the same
 answer instead of each run becoming the next one's baseline — and the numbers
 are the disk as of the last scan, not as of now. Press `r` in the TUI to rescan.
 
@@ -176,9 +176,13 @@ keep the context you need before deleting something.
 ## The HTML report
 
 ```bash
-disk-space-differ --html growth.html --open   # scan, then write the report
-disk-space-differ --html growth.html --no-scan  # rebuild from stored snapshots
+disk-space-differ --report            # scan, then write the report and open it
+disk-space-differ --report --no-scan  # rebuild from stored snapshots
 ```
+
+`--report` always writes `report.html` in the working directory, replacing the
+one from the last run, and then opens it — so a browser tab left on that file
+shows the newest report on reload.
 
 A single self-contained file — no external requests, no CDN, no network. It
 opens straight from disk and keeps working offline.
@@ -248,8 +252,10 @@ makes the trend column useful:
 
 ```cron
 0 9 * * * /usr/local/bin/disk-space-differ --plain >> ~/disk-growth.log 2>&1
-0 9 * * * /usr/local/bin/disk-space-differ --html ~/disk-growth.html
 ```
+
+`--report` is not for cron: it opens a browser. Scan on a schedule with
+`--plain`, then read the history whenever you like with `--report --no-scan`.
 
 ## Deleting
 

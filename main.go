@@ -49,10 +49,9 @@ func run() error {
 		lvl        = flag.Int("level", 1, "tree level to report: 1 is leaf folders, 2 is the folders holding them, and so on")
 		plain      = flag.Bool("plain", false, "print the report and exit instead of opening the TUI")
 		asJSON     = flag.Bool("json", false, "print the report as JSON and exit")
-		htmlPath   = flag.String("html", "", "write an HTML report with charts to this path")
+		htmlReport = flag.Bool("report", false, "write report.html with charts here, replacing any earlier one, and open it")
 		noScan     = flag.Bool("no-scan", false, "report the stored snapshots without scanning; starts instantly")
 		scans      = flag.Int("scans", report.MinScans, "how many recorded scans the comparison spans: 2 is the last two, more reaches further back (+/- in the TUI)")
-		openAfter  = flag.Bool("open", false, "with -html, open the report when it is written")
 		initConfig = flag.Bool("init-config", false, "write a default config file and exit")
 		showVer    = flag.Bool("version", false, "print the version and exit")
 	)
@@ -99,8 +98,8 @@ func run() error {
 	}
 	defer st.Close()
 
-	if *htmlPath != "" {
-		return runHTML(cfg, st, *htmlPath, *noScan, *openAfter)
+	if *htmlReport {
+		return runHTML(cfg, st, reportFile, *noScan)
 	}
 	window := max(report.MinScans, *scans)
 	if *plain || *asJSON {
@@ -109,8 +108,12 @@ func run() error {
 	return runTUI(cfg, st, *noScan, window)
 }
 
-// runHTML scans (unless told not to) and writes the charted report.
-func runHTML(cfg config.Config, st *store.Store, path string, noScan, openAfter bool) error {
+// reportFile is where -report always writes: one file in the working directory,
+// replaced on every run, so the link the browser already has stays current.
+const reportFile = "report.html"
+
+// runHTML scans (unless told not to), writes the charted report and opens it.
+func runHTML(cfg config.Config, st *store.Store, path string, noScan bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -138,10 +141,10 @@ func runHTML(cfg config.Config, st *store.Store, path string, noScan, openAfter 
 	}
 	fmt.Println("wrote", abs)
 
-	if openAfter {
-		if err := browserOpen(abs); err != nil {
-			fmt.Fprintln(os.Stderr, "could not open the report:", err)
-		}
+	// A failure to open is worth saying out loud but not worth failing over:
+	// the report is already on disk and the path was just printed.
+	if err := browserOpen(abs); err != nil {
+		fmt.Fprintln(os.Stderr, "could not open the report:", err)
 	}
 	return nil
 }
