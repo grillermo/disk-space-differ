@@ -16,7 +16,7 @@ func testModel(t *testing.T, results []*report.Result) *Model {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Top = 20
-	m := New(cfg, nil)
+	m := New(cfg, nil, false, report.MinScans)
 	m.roots = []string{"/tmp/sandbox"}
 	m.width, m.height = 110, 26
 	m.results = results

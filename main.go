@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -49,7 +50,8 @@ func run() error {
 		plain      = flag.Bool("plain", false, "print the report and exit instead of opening the TUI")
 		asJSON     = flag.Bool("json", false, "print the report as JSON and exit")
 		htmlPath   = flag.String("html", "", "write an HTML report with charts to this path")
-		noScan     = flag.Bool("no-scan", false, "with -html, build the report from stored snapshots without scanning")
+		noScan     = flag.Bool("no-scan", false, "report the stored snapshots without scanning; starts instantly")
+		scans      = flag.Int("scans", report.MinScans, "how many recorded scans the comparison spans: 2 is the last two, more reaches further back (+/- in the TUI)")
 		openAfter  = flag.Bool("open", false, "with -html, open the report when it is written")
 		initConfig = flag.Bool("init-config", false, "write a default config file and exit")
 		showVer    = flag.Bool("version", false, "print the version and exit")
@@ -100,10 +102,11 @@ func run() error {
 	if *htmlPath != "" {
 		return runHTML(cfg, st, *htmlPath, *noScan, *openAfter)
 	}
+	window := max(report.MinScans, *scans)
 	if *plain || *asJSON {
-		return runPlain(cfg, st, *asJSON, max(1, *lvl))
+		return runPlain(cfg, st, *asJSON, max(1, *lvl), *noScan, window)
 	}
-	return runTUI(cfg, st)
+	return runTUI(cfg, st, *noScan, window)
 }
 
 // runHTML scans (unless told not to) and writes the charted report.
@@ -178,8 +181,8 @@ Snapshots:   %s
 `, config.DefaultPath(), store.DefaultPath())
 }
 
-func runTUI(cfg config.Config, st *store.Store) error {
-	m := tui.New(cfg, st)
+func runTUI(cfg config.Config, st *store.Store, noScan bool, scans int) error {
+	m := tui.New(cfg, st, noScan, scans)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	m.SetProgram(p)
 	_, err := p.Run()
@@ -188,16 +191,31 @@ func runTUI(cfg config.Config, st *store.Store) error {
 
 // runPlain produces the same report without the interactive layer, for cron
 // jobs and shell pipelines.
-func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int) error {
+func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan bool, scans int) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	var results []*report.Result
 	for _, root := range cfg.ResolvedRoots() {
-		if !asJSON {
-			fmt.Fprintf(os.Stderr, "scanning %s...\n", root)
+		var res *report.Result
+		var err error
+		switch {
+		case noScan:
+			res, err = report.FromStore(st, root, scans)
+		default:
+			if !asJSON {
+				fmt.Fprintf(os.Stderr, "scanning %s...\n", root)
+			}
+			res, err = report.Run(ctx, st, cfg, root, nil)
+			// The fresh scan is now the newest stored one, so a wider window is
+			// the same report read further back rather than a second scan.
+			if err == nil && scans > report.MinScans && !res.Baseline {
+				res, err = report.FromStore(st, root, scans)
+			}
 		}
-		res, err := report.Run(ctx, st, cfg, root, nil)
+		if errors.Is(err, report.ErrNeedTwoScans) {
+			return fmt.Errorf("%w — run without -no-scan twice to record them", err)
+		}
 		if err != nil {
 			return err
 		}
@@ -222,9 +240,14 @@ func printText(results []*report.Result, lvl, top int) {
 				humanize.Duration(res.Current.Duration))
 			fmt.Printf("  largest directories:\n")
 		} else {
-			fmt.Printf("  %s since %s  (now %s, scanned in %s)\n",
+			span := ""
+			if res.Scans > report.MinScans {
+				span = fmt.Sprintf(", across the last %d scans", res.Scans)
+			}
+			fmt.Printf("  %s since %s%s  (now %s, scanned in %s)\n",
 				humanize.SignedBytes(res.TotalDelta()),
 				humanize.Since(res.Previous.StartedAt),
+				span,
 				humanize.Bytes(res.Current.TotalUsage),
 				humanize.Duration(res.Current.Duration))
 		}
@@ -266,6 +289,7 @@ type jsonRow struct {
 type jsonResult struct {
 	Root       string    `json:"root"`
 	Baseline   bool      `json:"baseline"`
+	Scans      int       `json:"scans"`
 	Level      int       `json:"level"`
 	MaxLevel   int       `json:"max_level"`
 	ScannedAt  string    `json:"scanned_at"`
@@ -282,6 +306,7 @@ func printJSON(results []*report.Result, lvl, top int) error {
 		jr := jsonResult{
 			Root:       res.Root,
 			Baseline:   res.Baseline,
+			Scans:      res.Scans,
 			Level:      min(lvl, res.MaxLevel()),
 			MaxLevel:   res.MaxLevel(),
 			ScannedAt:  res.Current.StartedAt.Format("2006-01-02T15:04:05Z07:00"),

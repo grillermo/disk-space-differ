@@ -3,6 +3,7 @@ package report
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -34,6 +35,12 @@ type Result struct {
 	// Baseline is true when this run had nothing to compare against. Rows then
 	// rank directories by the space they hold rather than by growth.
 	Baseline bool
+
+	// Scans is how many recorded scans the comparison spans, Previous being the
+	// oldest of them. Two is the narrowest window there is; a wider one reaches
+	// further back, so slow growth that each single run barely registers adds up
+	// into something visible.
+	Scans int
 
 	// Levels and the caches below are built on first use rather than in Run, so
 	// that a Result assembled by hand still answers level queries.
@@ -144,21 +151,89 @@ func Run(
 		return nil, fmt.Errorf("pruning old snapshots: %w", err)
 	}
 
-	res := &Result{Root: root, Current: current, Previous: previous}
-	if previous == nil {
-		res.Baseline = true
-		res.Rows = baselineRows(current.Dirs)
-	} else {
-		res.Rows = diff.Compute(prevDirs, current.Dirs)
-		sort.Slice(res.Rows, func(i, j int) bool {
-			return absInt64(res.Rows[i].Delta) > absInt64(res.Rows[j].Delta)
-		})
-	}
-
+	res := build(root, current, previous, prevDirs)
 	if err := attachHistory(st, root, res); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+// ErrNeedTwoScans reports that a root has fewer than the two recorded snapshots
+// a scan-free comparison needs. Callers that can offer to scan (the TUI) match
+// on it rather than on the message.
+var ErrNeedTwoScans = errors.New("needs two recorded scans to compare")
+
+// MinScans is the narrowest window a comparison can have: something to measure,
+// and something to measure it against.
+const MinScans = 2
+
+// StoredCount is how many snapshots root has recorded, which is how far back a
+// scan-free report can be asked to reach.
+func StoredCount(st *store.Store, root string) (int, error) {
+	n, err := st.Count(root)
+	if err != nil {
+		return 0, fmt.Errorf("counting snapshots for %s: %w", root, err)
+	}
+	return n, nil
+}
+
+// FromStore reports the change across the last scans recorded for root, without
+// touching the disk. It is what -no-scan reads: the comparison ends where the
+// last scan ended, so it stays put rather than drifting with the filesystem.
+//
+// scans is how many recorded scans the window spans — 2 compares the last two
+// runs, 5 measures the newest against the fifth-newest. A root with fewer than
+// that stored is compared across everything it has, so widening the window past
+// the end of the history is harmless rather than an error.
+//
+// Unlike Run it records nothing, so repeated calls keep answering the same
+// question instead of each one becoming the next one's baseline. That is also
+// why a single stored snapshot is an error rather than a baseline report: Run
+// records a baseline as a side effect of scanning, and this never scans.
+func FromStore(st *store.Store, root string, scans int) (*Result, error) {
+	recent, err := st.Recent(root, max(MinScans, scans))
+	if err != nil {
+		return nil, fmt.Errorf("loading snapshots for %s: %w", root, err)
+	}
+	if len(recent) < MinScans {
+		return nil, fmt.Errorf("%s has %d of %d recorded scans: %w",
+			root, len(recent), MinScans, ErrNeedTwoScans)
+	}
+
+	current, previous := &recent[0], &recent[len(recent)-1]
+	if current.Dirs, err = st.Dirs(current.ID); err != nil {
+		return nil, fmt.Errorf("loading directories: %w", err)
+	}
+	prevDirs, err := st.Dirs(previous.ID)
+	if err != nil {
+		return nil, fmt.Errorf("loading previous directories: %w", err)
+	}
+	previous.Dirs = prevDirs
+
+	res := build(root, current, previous, prevDirs)
+	res.Scans = len(recent)
+	if err := attachHistory(st, root, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// build turns a pair of snapshots into a ranked result. With nothing to compare
+// against it falls back to ranking by the space each directory holds.
+func build(root string, current, previous *model.Snapshot, prevDirs []model.DirStat) *Result {
+	res := &Result{Root: root, Current: current, Previous: previous, Scans: MinScans}
+	if previous == nil {
+		res.Baseline = true
+		res.Scans = 1
+		res.Rows = baselineRows(current.Dirs)
+		return res
+	}
+
+	res.Rows = diff.Compute(prevDirs, current.Dirs)
+	sort.Slice(res.Rows, func(i, j int) bool {
+		return absInt64(res.Rows[i].Delta) > absInt64(res.Rows[j].Delta)
+	})
+	return res
 }
 
 // latest loads the most recent stored snapshot for root, or nil if there is none.

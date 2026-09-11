@@ -11,6 +11,7 @@ import (
 	"github.com/grillermo/disk-space-differ/internal/humanize"
 	"github.com/grillermo/disk-space-differ/internal/level"
 	"github.com/grillermo/disk-space-differ/internal/model"
+	"github.com/grillermo/disk-space-differ/internal/report"
 )
 
 // Fixed column widths. The path column absorbs whatever space is left, since
@@ -42,6 +43,8 @@ func (m *Model) View() string {
 		return m.viewError()
 	case stateConfirmDelete:
 		return m.viewConfirm()
+	case stateNeedScan:
+		return m.viewNeedScan()
 	case stateInspect:
 		return m.viewInspect()
 	default:
@@ -81,6 +84,33 @@ func (m *Model) viewScanning() string {
 func (m *Model) viewError() string {
 	return "\n  " + dangerTxt.Render("scan failed") + "\n\n  " +
 		subtleTxt.Render(m.err.Error()) + "\n\n  " + helpBar.Render("q quit") + "\n"
+}
+
+// viewNeedScan explains why -no-scan has nothing to show and offers the only
+// two ways forward: scan now, or leave the database untouched and quit.
+func (m *Model) viewNeedScan() string {
+	lines := []string{
+		warnTxt.Render("Nothing to compare yet"),
+		"",
+		subtleTxt.Render("Comparing needs two recorded scans: one to be the baseline,"),
+		subtleTxt.Render("one to measure against it. -no-scan only reads what is stored."),
+		"",
+	}
+	for _, r := range m.needScan {
+		lines = append(lines, accentTxt.Render(prettyPath(r.root))+
+			subtleTxt.Render(fmt.Sprintf("  %d of 2 scans recorded", r.stored)))
+	}
+	lines = append(lines,
+		"",
+		"  "+accentTxt.Render("s")+subtleTxt.Render(" scan now")+
+			"    "+accentTxt.Render("q")+subtleTxt.Render(" quit"),
+	)
+
+	box := confirmBox.Render(strings.Join(lines, "\n"))
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return "\n" + box + "\n"
 }
 
 func (m *Model) viewConfirm() string {
@@ -275,7 +305,14 @@ func (m *Model) renderHeader() string {
 
 	var right string
 	if len(m.results) > 0 && m.results[0].Previous != nil {
-		right = subtleTxt.Render("compared with " + humanize.Since(m.results[0].Previous.StartedAt))
+		res := m.results[0]
+		// The window is named only once it is wider than the default, so the
+		// common case stays uncluttered.
+		span := ""
+		if res.Scans > report.MinScans {
+			span = fmt.Sprintf("last %d scans · ", res.Scans)
+		}
+		right = subtleTxt.Render(span + "compared with " + humanize.Since(res.Previous.StartedAt))
 	} else {
 		right = warnTxt.Render("first run · baseline recorded")
 	}
@@ -409,8 +446,17 @@ func (m *Model) renderHelp() string {
 		position = fmt.Sprintf("%d/%d · ", m.table.cursor+1, len(m.rows))
 	}
 	return " " + helpBar.Render(position+accentTxt.Render(m.view.label())+
-		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · ↑↓ move · ←→ level · enter inspect · tab view · d delete · o open · r rescan · q quit",
-			m.level, m.maxLevel))) + "\n"
+		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · scans %d · ↑↓ move · ←→ level · +/- scans · enter inspect · tab view · d delete · o open · r rescan · q quit",
+			m.level, m.maxLevel, m.displayedScans()))) + "\n"
+}
+
+// displayedScans is how wide the window on screen actually is, which is the
+// requested width only until it runs out of history to reach into.
+func (m *Model) displayedScans() int {
+	if len(m.results) == 0 {
+		return m.scans
+	}
+	return m.results[0].Scans
 }
 
 func (m *Model) renderInspectHelp() string {

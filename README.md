@@ -35,6 +35,8 @@ external tools to install.
 ```bash
 disk-space-differ                 # scan configured roots, open the TUI
 disk-space-differ ~/Downloads     # scan a specific directory instead
+disk-space-differ --no-scan       # open the stored scans, instantly
+disk-space-differ --scans 10      # compare across the last ten scans
 disk-space-differ --plain         # print and exit (for cron)
 disk-space-differ --json          # machine-readable output
 disk-space-differ --html report.html --open   # charted HTML report
@@ -47,6 +49,7 @@ disk-space-differ --init-config   # write a default config file
 | `←` / `h` | up a tree level (coarser) |
 | `→` / `l` | down a tree level (finer) |
 | `enter` | inspect the selected directory (see below) |
+| `+` / `-` | widen / narrow the comparison window (how many scans back) |
 | `tab` | cycle view: growth → all changes → largest → by path |
 | `d` | delete the selected directory (asks first) |
 | `o` | reveal in the file manager |
@@ -55,6 +58,32 @@ disk-space-differ --init-config   # write a default config file
 
 The first run has nothing to compare against, so it records a baseline and lists
 the directories holding the most space. Growth appears from the second run on.
+
+### How far back to compare
+
+By default a report compares the last two scans. `+` widens that window one scan
+at a time and `-` narrows it back down, with two — something to measure, and
+something to measure it against — as the floor. The window reads out of the
+database, so it changes instantly and never rescans; `--scans N` sets it up
+front, for `--plain` and `--json` too.
+
+Widening is how slow growth becomes visible. A cache that gains 40 MB a day
+looks like noise between two runs and like 1.2 GB across thirty of them. The
+newest scan is always the near end of the window, so a wider one measures from
+further back rather than showing a different tree — the table stays where it is,
+and only the numbers reach deeper. `+` past the oldest stored scan stops there
+and says so.
+
+### `--no-scan`
+
+`--no-scan` skips scanning entirely and reports the scans already in the
+database, so it opens instantly and works with `--plain`, `--json` and
+`--html` too. It records nothing, so the same command keeps giving the same
+answer instead of each run becoming the next one's baseline — and the numbers
+are the disk as of the last scan, not as of now. Press `r` in the TUI to rescan.
+
+Comparing needs two recorded scans. With fewer, the TUI says so and offers to
+scan now or quit; `--plain` and `--json` exit with that message.
 
 ## Levels
 

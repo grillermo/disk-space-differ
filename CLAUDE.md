@@ -92,6 +92,21 @@ ancestor-or-self at or above level n.
 ancestor's path is always a strict prefix, hence shorter, so a directory's height
 is final before its ancestor reads it.
 
+### Two ways to build a Result
+
+`report.Run` scans, records, and compares against the run before it.
+`report.FromStore` compares snapshots that are already recorded and **writes
+nothing** — it is what `-no-scan` reads and what `+`/`-` re-read. Recording there
+would make every read the next read's baseline, so the same command would stop
+giving the same answer.
+
+`FromStore(st, root, scans)` takes the window in *scans*, not in time:
+`recent[0]` against `recent[scans-1]`, clamped to what the history holds
+(`Result.Scans` reports the width actually used). Both ends being real recorded
+snapshots is what keeps attribution intact — a window is a different pair of
+snapshots fed to the same `diff.Compute`, never a sum of per-run deltas, which
+would double-charge directories that moved in more than one run.
+
 ### report.Result caching
 
 `Result` builds its `level.Index` and per-level row sets lazily, on first use

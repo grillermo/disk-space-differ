@@ -148,6 +148,14 @@ func (s *Store) Recent(root string, limit int) ([]model.Snapshot, error) {
 	return out, rows.Err()
 }
 
+// Count is how many snapshots are recorded for root, which bounds how far back
+// a comparison can reach.
+func (s *Store) Count(root string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM snapshots WHERE root = ?`, root).Scan(&n)
+	return n, err
+}
+
 // Dirs loads the directory rows of one snapshot.
 func (s *Store) Dirs(snapshotID int64) ([]model.DirStat, error) {
 	rows, err := s.db.Query(

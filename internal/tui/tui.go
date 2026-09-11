@@ -57,8 +57,16 @@ const (
 	stateTable
 	stateInspect
 	stateConfirmDelete
+	stateNeedScan
 	stateError
 )
+
+// shortRoot is a root that -no-scan cannot report on yet, and how many of the
+// two scans a comparison needs it has.
+type shortRoot struct {
+	root   string
+	stored int
+}
 
 type viewMode int
 
@@ -92,7 +100,13 @@ type (
 	}
 	scanDoneMsg struct{ results []*report.Result }
 	scanErrMsg  struct{ err error }
-	deletedMsg  struct {
+	needScanMsg struct{ roots []shortRoot }
+	storedMsg   struct {
+		results []*report.Result
+		scans   int
+		stored  int
+	}
+	deletedMsg struct {
 		path  string
 		freed int64
 		err   error
@@ -141,10 +155,25 @@ type Model struct {
 	// deleted tracks paths removed during this session so the table can mark
 	// them without forcing an immediate rescan.
 	deleted map[string]bool
+
+	// noScan opens on the stored snapshots instead of scanning. It only governs
+	// the first load; `r` still rescans, because that is an explicit ask.
+	noScan bool
+
+	// scans is how many recorded scans the comparison spans, widened with `+`
+	// and narrowed with `-`. stored is how far back the history actually goes,
+	// so the window cannot be widened past the end of it.
+	scans  int
+	stored int
+
+	// needScan lists the roots that -no-scan found too few stored scans for.
+	needScan []shortRoot
 }
 
-// New builds a model that will scan the configured roots on start.
-func New(cfg config.Config, st *store.Store) *Model {
+// New builds a model that will scan the configured roots on start, or, with
+// noScan, open on the snapshots already recorded for them. scans is the width of
+// the comparison window in recorded scans; `+` and `-` change it later.
+func New(cfg config.Config, st *store.Store, noScan bool, scans int) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = accentTxt
@@ -159,6 +188,9 @@ func New(cfg config.Config, st *store.Store) *Model {
 		maxLevel: 1,
 		spinner:  sp,
 		deleted:  map[string]bool{},
+		noScan:   noScan,
+		scans:    max(report.MinScans, scans),
+		stored:   report.MinScans,
 	}
 }
 
@@ -166,9 +198,49 @@ func New(cfg config.Config, st *store.Store) *Model {
 // background scan goroutine.
 func (m *Model) SetProgram(p *tea.Program) { m.prog = p }
 
-// Init starts the spinner and the first scan.
+// Init starts the spinner and the first load.
 func (m *Model) Init() tea.Cmd {
+	if m.noScan {
+		return m.storedCmd(m.scans)
+	}
 	return tea.Batch(m.spinner.Tick, m.scanCmd())
+}
+
+// storedCmd reports across the last `scans` recorded snapshots of every root. It
+// touches nothing but the database, so the table is on screen immediately — which
+// is what makes widening the window an interactive move rather than a rescan.
+//
+// A root with fewer than two recorded scans has nothing to compare, and this
+// mode will not scan behind the user's back, so it asks instead.
+func (m *Model) storedCmd(scans int) tea.Cmd {
+	return func() tea.Msg {
+		var short []shortRoot
+		deepest := 0
+		for _, root := range m.roots {
+			n, err := report.StoredCount(m.store, root)
+			if err != nil {
+				return scanErrMsg{err}
+			}
+			deepest = max(deepest, n)
+			if n < report.MinScans {
+				short = append(short, shortRoot{root: root, stored: n})
+			}
+		}
+		if len(short) > 0 {
+			return needScanMsg{roots: short}
+		}
+
+		scans = clampInt(scans, report.MinScans, max(report.MinScans, deepest))
+		var results []*report.Result
+		for _, root := range m.roots {
+			res, err := report.FromStore(m.store, root, scans)
+			if err != nil {
+				return scanErrMsg{err}
+			}
+			results = append(results, res)
+		}
+		return storedMsg{results: results, scans: scans, stored: deepest}
+	}
 }
 
 // scanCmd scans every configured root in the background, streaming progress
@@ -223,6 +295,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.reset()
 		m.browse.reset()
 		m.rebuildRows()
+		// A scan only ever compares against the run before it, so a window wider
+		// than that is re-read from the store, the fresh scan now being its newest
+		// end.
+		if m.scans > report.MinScans {
+			return m, m.storedCmd(m.scans)
+		}
+		return m, nil
+
+	case storedMsg:
+		// Widening the window leaves the newest scan where it is, so the table is
+		// still describing the same tree: the cursor and any open inspect trail
+		// stay put rather than being thrown away.
+		if msg.scans < m.scans {
+			m.status = fmt.Sprintf("only %d scans recorded", msg.stored)
+		}
+		m.scans, m.stored = msg.scans, msg.stored
+		m.results = msg.results
+		m.state = stateTable
+		m.rebuildRows()
+		return m, nil
+
+	case needScanMsg:
+		m.needScan = msg.roots
+		m.state = stateNeedScan
 		return m, nil
 
 	case scanErrMsg:
@@ -258,6 +354,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.handleConfirmKey(msg)
 	case stateInspect:
 		return m.handleInspectKey(msg)
+	case stateNeedScan:
+		// Anything but "scan now" falls through to the global quit keys, so the
+		// prompt is never a trap.
+		if s := msg.String(); s == "s" || s == "S" || s == "enter" || s == "y" {
+			m.needScan = nil
+			m.state = stateScanning
+			m.progress = scan.Progress{}
+			return tea.Batch(m.spinner.Tick, m.scanCmd())
+		}
 	}
 
 	switch msg.String() {
@@ -293,6 +398,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.setLevel(m.level + 1)
 	case "right", "l":
 		m.setLevel(m.level - 1)
+	case "+", "=":
+		// The window is widened optimistically; the load clamps it to what the
+		// history actually holds and says so.
+		m.scans++
+		return m.storedCmd(m.scans)
+	case "-", "_":
+		if m.scans <= report.MinScans {
+			m.status = "already comparing the last two scans"
+			return nil
+		}
+		m.scans--
+		return m.storedCmd(m.scans)
 	case "r":
 		m.state = stateScanning
 		m.progress = scan.Progress{}
