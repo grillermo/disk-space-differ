@@ -141,6 +141,11 @@
   .chart-host { position: relative; }
   .chart-host svg { display: block; width: 100%; height: auto; overflow: visible; }
   .chart-host:focus-visible { outline: 2px solid var(--series-1); outline-offset: 4px; border-radius: 8px; }
+  /* Paths are shown whole, so this host scrolls in both directions rather than
+     shrinking the chart to fit them: vertically past the rows, horizontally
+     past the longest path. */
+  .chart-host.scroll { overflow: auto; max-height: 70vh; }
+  .chart-host.scroll svg { width: auto; height: auto; max-width: none; }
 
   .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; }
   .legend-item { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); }
@@ -485,27 +490,35 @@ function lineChart(host, opts) {
  * length carries the magnitude.
  */
 function divergingBars(host, rows) {
-  const width = Math.max(host.clientWidth || 720, 320);
-  const gutter = Math.min(300, Math.max(150, Math.round(width * 0.30)));
+  const avail = Math.max(host.clientWidth || 720, 320);
 
   const maxPos = Math.max(0, ...rows.map((r) => r.delta));
   const maxNeg = Math.max(0, ...rows.map((r) => -r.delta));
 
   // Value labels sit outside the bar end, so a lane is reserved on each side
-  // that has bars. Without the left lane a reclaimed-space label would run back
-  // into the folder names.
+  // that has bars. Without the left lane a reclaimed-space label would run off
+  // the chart.
   const lane = 86;
-  const leftLane = maxNeg > 0 ? lane : 0;
-  const m = { top: 8, right: maxPos > 0 ? lane + 8 : 16, bottom: 26, left: gutter + leftLane };
+  const m = { top: 8, right: maxPos > 0 ? lane : 12, bottom: 26, left: maxNeg > 0 ? lane : 12 };
+
+  // Bars own a fixed left column; paths sit in the column to its right and are
+  // never truncated, so the column is sized from the real glyph widths and the
+  // host scrolls when the longest path outruns the card.
+  const barCol = Math.min(560, Math.max(240, Math.round(avail * 0.45)));
+  const labelX = barCol + 16;
+  const labelW = Math.max(0, ...rows.map((r) => textWidth(r.label)));
+  const width = Math.max(avail, Math.ceil(labelX + labelW + 12));
+
   const band = 26, barH = Math.min(24, band - 2); // <=24px thick, 2px surface gap
   const ih = rows.length * band;
   const height = ih + m.top + m.bottom;
-  const iw = Math.max(40, width - m.left - m.right);
+  const iw = Math.max(40, barCol - m.left - m.right);
   const span = (maxPos + maxNeg) || 1;
   const zeroX = m.left + (maxNeg / span) * iw;
   const scale = (v) => (v / span) * iw;
 
-  const svg = sv("svg", { viewBox: `0 0 ${width} ${height}`, role: "img" });
+  host.classList.add("scroll");
+  const svg = sv("svg", { viewBox: `0 0 ${width} ${height}`, width, height, role: "img" });
   svg.setAttribute("aria-label", "Change in size by folder");
 
   const tip = el("div", "tooltip");
@@ -524,12 +537,12 @@ function divergingBars(host, rows) {
       : `M${x0 + w},${yTop}h${-(w - rad)}a${rad},${rad} 0 0 0 ${-rad},${rad}v${barH - 2 * rad}a${rad},${rad} 0 0 0 ${rad},${rad}h${w - rad}z`;
     svg.appendChild(sv("path", { d, fill: hue }));
 
-    // Folder name in the left gutter, in ink - never in the series colour.
+    // Full path to the right of the bars, in ink - never in the series colour.
     const name = sv("text", {
-      x: gutter - 12, y: yTop + barH / 2 + 4, "text-anchor": "end",
+      x: labelX, y: yTop + barH / 2 + 4, "text-anchor": "start",
       fill: "var(--text-primary)", "font-size": 12,
     });
-    name.textContent = truncateStart(r.label, Math.floor((gutter - 12) / 6.4));
+    name.textContent = r.label;
     const title = sv("title");
     title.textContent = r.path;
     name.appendChild(title);
@@ -547,7 +560,7 @@ function divergingBars(host, rows) {
 
     // Hit target spans the whole row and is at least 24px tall.
     const hit = sv("rect", {
-      x: m.left, y: m.top + i * band, width: iw, height: band, fill: "transparent",
+      x: 0, y: m.top + i * band, width, height: band, fill: "transparent",
     });
     hit.style.cursor = "default";
     const onEnter = () => {
@@ -565,10 +578,11 @@ function divergingBars(host, rows) {
       row2.appendChild(el("span", "tt-name", "size now"));
       tip.appendChild(row2);
       tip.dataset.show = "1";
-      const sc = (host.clientWidth || width) / width;
+      // The svg is drawn at its natural size inside a scrolling host, so these
+      // are content coordinates - the tooltip scrolls along with its row.
       const tw = tip.offsetWidth;
-      tip.style.left = Math.max(0, Math.min(zeroX * sc + 14, (host.clientWidth || width) - tw)) + "px";
-      tip.style.top = (m.top + i * band) * sc + "px";
+      tip.style.left = Math.max(0, Math.min(zeroX + 14, width - tw)) + "px";
+      tip.style.top = (m.top + i * band) + "px";
     };
     hit.addEventListener("pointerenter", onEnter);
     hit.addEventListener("pointerleave", () => { tip.dataset.show = "0"; });
@@ -583,6 +597,20 @@ function divergingBars(host, rows) {
 
   host.appendChild(svg);
   host.appendChild(tip);
+}
+
+/* Width of a 12px label, measured against the page font rather than estimated
+ * per character: the path column is sized from this, and an estimate that ran
+ * short would clip exactly the paths this column exists to show. */
+let measureCtx;
+function textWidth(s) {
+  if (!measureCtx) {
+    measureCtx = document.createElement("canvas").getContext("2d");
+    // Spelled out rather than read back from the body: the font shorthand is
+    // not reliably resolved by getComputedStyle. Keep in step with body{font}.
+    measureCtx.font = '12px system-ui, -apple-system, "Segoe UI", sans-serif';
+  }
+  return measureCtx.measureText(s).width;
 }
 
 function truncateStart(s, max) {
