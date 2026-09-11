@@ -507,7 +507,9 @@ function divergingBars(host, rows) {
   const barCol = Math.min(560, Math.max(240, Math.round(avail * 0.45)));
   const labelX = barCol + 16;
   const labelW = Math.max(0, ...rows.map((r) => textWidth(r.label)));
-  const width = Math.max(avail, Math.ceil(labelX + labelW + 12));
+  // The trailing room is for the "copied" flash, which follows the longest
+  // label and would otherwise fall outside the scrollable area.
+  const width = Math.max(avail, Math.ceil(labelX + labelW + 60));
 
   const band = 26, barH = Math.min(24, band - 2); // <=24px thick, 2px surface gap
   const ih = rows.length * band;
@@ -538,14 +540,20 @@ function divergingBars(host, rows) {
     svg.appendChild(sv("path", { d, fill: hue }));
 
     // Full path to the right of the bars, in ink - never in the series colour.
+    // No <title>: the label is already the whole path, so a hover popup would
+    // only repeat what is on screen.
     const name = sv("text", {
       x: labelX, y: yTop + barH / 2 + 4, "text-anchor": "start",
       fill: "var(--text-primary)", "font-size": 12,
     });
     name.textContent = r.label;
-    const title = sv("title");
-    title.textContent = r.path;
-    name.appendChild(title);
+    // Click to copy: the full path, not the ~-shortened label, because what is
+    // wanted from a clipboard is something a shell will accept.
+    name.style.cursor = "copy";
+    name.addEventListener("click", () => {
+      copyText(r.path);
+      flash(svg, labelX + textWidth(r.label) + 10, yTop + barH / 2 + 4);
+    });
     svg.appendChild(name);
 
     // Value outside the bar end, so it is never clipped by a short bar.
@@ -558,9 +566,10 @@ function divergingBars(host, rows) {
     val.textContent = fmtSigned(r.delta);
     svg.appendChild(val);
 
-    // Hit target spans the whole row and is at least 24px tall.
+    // Hit target covers the bar column only, and is at least 24px tall. It
+    // stops short of the path column so that reading a path raises nothing.
     const hit = sv("rect", {
-      x: 0, y: m.top + i * band, width, height: band, fill: "transparent",
+      x: 0, y: m.top + i * band, width: barCol, height: band, fill: "transparent",
     });
     hit.style.cursor = "default";
     const onEnter = () => {
@@ -611,6 +620,39 @@ function textWidth(s) {
     measureCtx.font = '12px system-ui, -apple-system, "Segoe UI", sans-serif';
   }
   return measureCtx.measureText(s).width;
+}
+
+/* The report is opened from a file:// URL, where the async clipboard API is
+ * unavailable in some browsers, so a hidden textarea and execCommand stand in.
+ * Either way the copy must be silent about failure - the path is still on
+ * screen to select by hand. */
+function copyText(s) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(s).catch(() => execCopy(s));
+    return;
+  }
+  execCopy(s);
+}
+
+function execCopy(s) {
+  const ta = document.createElement("textarea");
+  ta.value = s;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-9999px;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch (e) { /* nothing to offer */ }
+  ta.remove();
+}
+
+/* A copy leaves no visible trace of its own, so the click gets one. */
+function flash(svg, x, y) {
+  const t = sv("text", {
+    x, y, fill: "var(--text-muted)", "font-size": 11,
+  });
+  t.textContent = "copied";
+  svg.appendChild(t);
+  setTimeout(() => t.remove(), 900);
 }
 
 function truncateStart(s, max) {
@@ -751,7 +793,7 @@ function render() {
 
   // Chart 3 - who moved, and which way.
   const c3 = card("Change by folder",
-    "Growth to the right, space reclaimed to the left. Each folder is charged only its own bytes.");
+    "Growth to the right, space reclaimed to the left. Each folder is charged only its own bytes. Click a path to copy it.");
   const h3 = el("div", "chart-host");
   c3.appendChild(h3);
   main.appendChild(c3);
