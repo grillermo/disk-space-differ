@@ -17,10 +17,8 @@ import (
 // Fixed column widths. The path column absorbs whatever space is left, since
 // it is the column that benefits most from extra room.
 const (
-	colRank  = 4
 	colDelta = 13
 	colTag   = 4
-	colTrend = 12
 	colSize  = 11
 	gutter   = 2
 
@@ -357,10 +355,8 @@ func (m *Model) renderColumnHeadings(pathWidth int) string {
 	}
 
 	head := strings.Join([]string{
-		pad("#", colRank),
 		padLeft(metric, colDelta),
 		pad("", colTag),
-		pad("TREND", colTrend),
 		padLeft("TOTAL", colSize),
 		pad(m.pathHeading(), pathWidth),
 	}, strings.Repeat(" ", gutter/2))
@@ -391,8 +387,6 @@ func (m *Model) renderRow(i, pathWidth int) string {
 	row := m.rows[i]
 	selected := i == m.table.cursor
 
-	rank := subtleTxt.Render(pad(fmt.Sprintf("%d", i+1), colRank))
-
 	delta := deltaStyle(row.Delta).Render(padLeft(deltaText(row, m.view), colDelta))
 
 	tag := pad("", colTag)
@@ -405,7 +399,6 @@ func (m *Model) renderRow(i, pathWidth int) string {
 		tag = subtleTxt.Render(pad("gone", colTag))
 	}
 
-	trend := subtleTxt.Render(pad(humanize.Sparkline(row.History), colTrend))
 	size := subtleTxt.Render(padLeft(humanize.Bytes(row.Usage), colSize))
 
 	pathText := humanize.Truncate(prettyPath(row.Path), pathWidth)
@@ -416,7 +409,7 @@ func (m *Model) renderRow(i, pathWidth int) string {
 	path := pathStyle.Render(pad(pathText, pathWidth))
 
 	sep := strings.Repeat(" ", gutter/2)
-	line := strings.Join([]string{rank, delta, tag, trend, size, path}, sep)
+	line := strings.Join([]string{delta, tag, size, path}, sep)
 
 	if selected {
 		return " " + selectedRow.Width(max(0, m.width-2)).Render(line) + "\n"
@@ -486,7 +479,7 @@ func (m *Model) visibleEntries() int {
 }
 
 func (m *Model) pathWidth() int {
-	fixed := colRank + colDelta + colTag + colTrend + colSize + 5*(gutter/2) + 2
+	fixed := colDelta + colTag + colSize + 3*(gutter/2) + 2
 	if m.width == 0 {
 		return 48
 	}
