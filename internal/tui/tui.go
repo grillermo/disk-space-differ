@@ -418,6 +418,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.openCmd()
 	case "d", "delete":
 		m.beginDelete()
+	case " ":
+		if row, ok := m.selectedRow(); ok {
+			m.status = prettyPath(row.Path)
+		}
 	}
 	return nil
 }
@@ -466,6 +470,10 @@ func (m *Model) handleInspectKey(msg tea.KeyMsg) tea.Cmd {
 		if entry, ok := m.selectedEntry(); ok {
 			m.status = "opened " + prettyPath(entry.Path)
 			return openInFileManager(entry.Path)
+		}
+	case " ":
+		if entry, ok := m.selectedEntry(); ok {
+			m.status = prettyPath(entry.Path)
 		}
 	}
 	return nil

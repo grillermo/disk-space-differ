@@ -441,7 +441,7 @@ func (m *Model) renderHelp() string {
 		position = fmt.Sprintf("%d/%d · ", m.table.cursor+1, len(m.rows))
 	}
 	return " " + helpBar.Render(position+accentTxt.Render(m.view.label())+
-		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · scans %d · ↑↓ move · ←→ level · +/- scans · enter inspect · tab view · d delete · o open · r rescan · q quit",
+		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · scans %d · ↑↓ move · ←→ level · +/- scans · enter inspect · tab view · space path · d delete · o open · r rescan · q quit",
 			m.level, m.maxLevel, m.displayedScans()))) + "\n"
 }
 
@@ -460,7 +460,7 @@ func (m *Model) renderInspectHelp() string {
 		position = fmt.Sprintf("%d/%d · ", m.browse.cursor+1, len(m.entries))
 	}
 	return " " + helpBar.Render(position+accentTxt.Render("inspect")+
-		subtleTxt.Render(" · ↑↓ move · enter open folder · ← back · esc leave · o reveal · q quit")) + "\n"
+		subtleTxt.Render(" · ↑↓ move · enter open folder · ← back · esc leave · space path · o reveal · q quit")) + "\n"
 }
 
 // visibleRows is how many table rows fit below the fixed chrome.
