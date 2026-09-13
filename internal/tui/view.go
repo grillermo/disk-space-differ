@@ -17,14 +17,16 @@ import (
 // Fixed column widths. The path column absorbs whatever space is left, since
 // it is the column that benefits most from extra room.
 const (
-	colDelta = 13
+	// Sized to the widest real value each column renders (e.g. "+1023 PiB",
+	// "gone", "100%"), plus a one-character margin — not to a round number.
+	colDelta = 10
 	colTag   = 4
-	colSize  = 11
+	colSize  = 9
 	gutter   = 2
 
 	// The inspect listing trades the rank and trend columns for a proportion
 	// bar, which is what answers "which of these is the problem" at a glance.
-	colBar   = 10
+	colBar   = 6
 	colShare = 4
 
 	// chromeLines counts the header, summary, column headings and help bar
@@ -328,7 +330,7 @@ func (m *Model) renderSummaries() string {
 			change = subtleTxt.Render("     baseline")
 		} else {
 			change = deltaStyle(res.TotalDelta()).Render(
-				lipgloss.PlaceHorizontal(13, lipgloss.Right, humanize.SignedBytes(res.TotalDelta())))
+				lipgloss.PlaceHorizontal(colDelta, lipgloss.Right, humanize.SignedBytes(res.TotalDelta())))
 		}
 
 		line := fmt.Sprintf("%s  %s  %s",
