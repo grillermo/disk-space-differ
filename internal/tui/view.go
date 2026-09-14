@@ -359,7 +359,6 @@ func (m *Model) renderColumnHeadings(pathWidth int) string {
 	head := strings.Join([]string{
 		padLeft(metric, colDelta),
 		pad("", colTag),
-		padLeft("TOTAL", colSize),
 		pad(m.pathHeading(), pathWidth),
 	}, strings.Repeat(" ", gutter/2))
 
@@ -401,8 +400,6 @@ func (m *Model) renderRow(i, pathWidth int) string {
 		tag = subtleTxt.Render(pad("gone", colTag))
 	}
 
-	size := subtleTxt.Render(padLeft(humanize.Bytes(row.Usage), colSize))
-
 	pathText := humanize.Truncate(prettyPath(row.Path), pathWidth)
 	pathStyle := lipgloss.NewStyle().Foreground(colHeadFG)
 	if m.deleted[row.Path] {
@@ -411,7 +408,7 @@ func (m *Model) renderRow(i, pathWidth int) string {
 	path := pathStyle.Render(pad(pathText, pathWidth))
 
 	sep := strings.Repeat(" ", gutter/2)
-	line := strings.Join([]string{delta, tag, size, path}, sep)
+	line := strings.Join([]string{delta, tag, path}, sep)
 
 	if selected {
 		return " " + selectedRow.Width(max(0, m.width-2)).Render(line) + "\n"
@@ -481,7 +478,7 @@ func (m *Model) visibleEntries() int {
 }
 
 func (m *Model) pathWidth() int {
-	fixed := colDelta + colTag + colSize + 3*(gutter/2) + 2
+	fixed := colDelta + colTag + 2*(gutter/2) + 2
 	if m.width == 0 {
 		return 48
 	}
