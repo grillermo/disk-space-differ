@@ -11,13 +11,13 @@ every week is.
  disk-space-differ                                       compared with 3d ago
       +4.21 GiB  ~                    77.0 GiB total · 2,388,362 items · 28.9s
 
- #           GROWTH      TREND              TOTAL PATH · level 1/9 · leaf folders
+ #           GROWTH      TREND              TOTAL PATH
  ─────────────────────────────────────────────────────────────────────────────
- 1        +2.31 GiB      ▁▁▂▃▅█          4.10 GiB ~/Library/Caches/Homebrew
- 2        +1.02 GiB new  ▁▁▁▁▁█          1.02 GiB ~/c/app/node_modules
- 3         +512 MiB      ▁▂▃▄▅█           980 MiB ~/Library/Caches/go-build
+ 1        +2.31 GiB      ▁▁▂▃▅█          4.10 GiB ~/Library
+ 2        +1.02 GiB new  ▁▁▁▁▁█          1.02 GiB ~/c/app
+ 3         +512 MiB      ▁▂▃▄▅█           980 MiB ~/Downloads
 
- 1/40 · growth · level 1/9 · ↑↓ move · ←→ level · tab view · d delete · q quit
+ 1/40 · growth · ↑↓ move · → inside folder · ← back · tab view · d delete · q quit
 ```
 
 ## Install
@@ -46,14 +46,15 @@ disk-space-differ --init-config   # write a default config file
 | Key | Action |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `←` / `h` | up a tree level (coarser) |
-| `→` / `l` | down a tree level (finer) |
+| `→` / `l` | step inside the selected folder |
+| `←` / `h` | back out to the folder above |
 | `enter` | inspect the selected directory (see below) |
 | `+` / `-` | widen / narrow the comparison window (how many scans back) |
-| `tab` | cycle view: growth → all changes → largest → by path |
+| `tab` | cycle view: growth → all changes → largest |
 | `d` | delete the selected directory (asks first) |
 | `o` | reveal in the file manager |
-| `r` | rescan |
+| `s` | rescan just the selected folder and step into it |
+| `r` | rescan every root |
 | `q` | quit |
 
 The first run has nothing to compare against, so it records a baseline and lists
@@ -85,34 +86,38 @@ are the disk as of the last scan, not as of now. Press `r` in the TUI to rescan.
 Comparing needs two recorded scans. With fewer, the TUI says so and offers to
 scan now or quit; `--plain` and `--json` exit with that message.
 
-## Levels
+## Walking down the tree
 
-`←` and `→` change how coarsely the same scan is read, without rescanning: `←`
-moves up the tree towards the root, `→` back down towards the files.
+The table opens on what your scan roots hold, and `→` steps into whichever
+folder is selected: `~/Library` becomes `~/Library/Caches`, `~/Library/Developer`
+and the rest of what is inside it. `←` steps back out, landing on the row you
+came from. Nothing is rescanned — it is the same snapshot read one folder
+further down.
 
-Levels are counted **from the leaves up**, not from the root down:
+`s` is the exception: it rescans the selected folder alone and steps into the
+result, which takes seconds where `r` on a home directory takes minutes. The
+fresh scan is measured against the most recent recording that covers that folder
+— your last full scan of the root, narrowed to it — so the first press already
+reports change rather than a baseline. It is recorded under the folder's own
+name too, so scanning it again measures from the last time you looked at it.
 
-- **Level 1** — folders holding no other folder. Where the bytes actually sit.
-- **Level 2** — folders holding one or more level 1 folders.
-- **Level 3** — folders holding one or more level 2 folders, and so on up to the
-  scan root, which is the highest level there is.
+Every row carries **everything that changed anywhere beneath it**, not just the
+files sitting directly in it. So the top of the list answers "which of my folders
+grew", and each `→` answers "which part of *that* one". Two hundred packages
+each adding 4 MB show up as one 800 MB row until you walk down to them.
 
-Counting from the leaves is what makes the levels comparable across branches of
-different lengths. `~/Library` is nine folders deep and `~/Downloads` is one, so
-"three folders down from the root" means nothing in common between them, while
-"three levels up from the files" always means the same kind of thing.
+Stepping in never changes the total. The change of a folder is divided among the
+things inside it — one share per subfolder, plus one row for the folder's own
+files — so the numbers on screen always still sum to that folder's change, which
+is the same conservation invariant the top-level ranking is built on. A folder
+whose subtree churned but whose size did not move drops off the list at every
+depth, which is the whole point of ranking by change rather than size.
 
-Level 1 tells you *what* grew; the levels above tell you *whose fault it is*. Two
-hundred packages each adding 4 MB is invisible at level 1 and a single 800 MB row
-at level 3.
+The folder you are inside is named in the `PATH` column heading.
 
-Moving up a level never changes the total. Growth is re-charged to the folder
-representing each row at that level, so the numbers on screen always still sum to
-the root's change — the same conservation invariant that governs level 1. A
-folder whose subtree churned but whose size did not move drops off the list at
-every level, which is the whole point of ranking by change rather than size.
-
-`--level N` does the same thing for `--plain` and `--json`.
+`--level N` reads the same scan at a fixed tree level for `--plain` and
+`--json`, counting from the leaves up: level 1 is the folders holding no other
+folder, level 2 the folders holding those, and so on to the scan root.
 
 ## Inspecting a folder
 

@@ -202,6 +202,99 @@ func TestAggregateLeavesLevelOneAlone(t *testing.T) {
 	}
 }
 
+// Drilling into a folder is a partition of that folder, exactly as folding onto
+// a level is: what it holds must account for its whole change and no more.
+func TestWithinDeltasSumToTheChangeOfTheFolderTheyBreakDown(t *testing.T) {
+	ix := Build(tree(sample), tree(sample))
+
+	rows := []model.GrowthRow{
+		{Path: "/r/deep/mid/leaf", Delta: 800},
+		{Path: "/r/deep", Delta: -50},
+		{Path: "/r/flat", Delta: 30},
+		{Path: "/r", Delta: 5},
+	}
+
+	for dir, want := range map[string]int64{
+		"/r":          785,
+		"/r/deep":     750,
+		"/r/deep/mid": 800,
+		"/r/flat":     30,
+	} {
+		got, ok := ix.Within(rows, dir)
+		if !ok {
+			t.Fatalf("%s is recorded but has no breakdown", dir)
+		}
+		var sum int64
+		for _, r := range got {
+			sum += r.Delta
+		}
+		if sum != want {
+			t.Errorf("inside %s the deltas sum to %d, want %d", dir, sum, want)
+		}
+	}
+}
+
+// Every change under a folder is charged to the one child that holds it, however
+// deep it actually sits, and the folder's own files carry whatever is left.
+func TestWithinChargesEachChildEverythingBeneathIt(t *testing.T) {
+	ix := Build(tree(sample), tree(sample))
+
+	rows := []model.GrowthRow{
+		{Path: "/r/deep/mid/leaf", Delta: 800},
+		{Path: "/r/deep", Delta: -50},
+		{Path: "/r/flat", Delta: 30},
+		{Path: "/r", Delta: 5},
+	}
+
+	got, _ := ix.Within(rows, "/r")
+	if d := rowFor(t, got, "/r/deep").Delta; d != 750 {
+		t.Errorf("/r/deep delta = %d, want 750: the deep leaf's 800 less its own -50", d)
+	}
+	if d := rowFor(t, got, "/r/flat").Delta; d != 30 {
+		t.Errorf("/r/flat delta = %d, want 30", d)
+	}
+
+	// /r's own row stands for its files, so it carries its own change alone and
+	// reports the bytes it holds directly rather than its cumulative usage.
+	own := rowFor(t, got, "/r")
+	if own.Delta != 5 {
+		t.Errorf("/r's own files delta = %d, want 5", own.Delta)
+	}
+	if own.Usage != 1 {
+		t.Errorf("/r's own files usage = %d, want the 1 byte it holds directly", own.Usage)
+	}
+}
+
+func TestWithinRefusesADirectoryThatWasNeverRecorded(t *testing.T) {
+	ix := Build(tree(sample), tree(sample))
+
+	if _, ok := ix.Within(nil, "/r/nowhere"); ok {
+		t.Error("an unrecorded directory should report no breakdown, not an empty one")
+	}
+}
+
+// The size view reads a folder as what it holds, including the parts of it that
+// did not move at all.
+func TestSizesWithinListEverythingTheFolderHolds(t *testing.T) {
+	ix := Build(tree(sample), tree(sample))
+
+	got, ok := ix.SizesWithin("/r")
+	if !ok {
+		t.Fatal("/r is recorded and should have contents")
+	}
+
+	var sum int64
+	for _, r := range got {
+		sum += r.Delta
+	}
+	if sum != 31 {
+		t.Errorf("the rows inside /r hold %d, want the 31 /r holds in total", sum)
+	}
+	if got[0].Path != "/r/flat" {
+		t.Errorf("largest inside /r = %s, want the 16 byte branch", got[0].Path)
+	}
+}
+
 func TestSizesConserveTotalUsageAtEveryLevel(t *testing.T) {
 	ix := Build(tree(sample), nil)
 

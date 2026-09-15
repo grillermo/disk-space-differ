@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/grillermo/disk-space-differ/internal/config"
 	"github.com/grillermo/disk-space-differ/internal/diff"
@@ -68,6 +69,21 @@ func (r *Result) Changes(lvl, n int) []model.GrowthRow { return diff.TopChanges(
 // whole chain of ancestors into the list alongside it.
 func (r *Result) Largest(lvl, n int) []model.GrowthRow {
 	return head(r.SizesAt(lvl), n)
+}
+
+// Within ranks what dir holds by the change charged to each part of it: the one
+// child containing a change carries it, and dir's own files carry the rest. It
+// is what drilling into a folder shows, and unlike Contents it keeps the
+// exclusive attribution the rest of the report ranks by, so the rows still sum
+// to dir's own change.
+func (r *Result) Within(dir string) ([]model.GrowthRow, bool) {
+	return r.levelIndex().Within(r.Rows, dir)
+}
+
+// SizesWithin ranks what dir holds by size instead of by change, for the size
+// view. Like Largest it is a deliberate exception to ranking by change.
+func (r *Result) SizesWithin(dir string) ([]model.GrowthRow, bool) {
+	return r.levelIndex().SizesWithin(dir)
 }
 
 // Contents lists what dir holds directly, for reading one directory as a tree
@@ -156,6 +172,100 @@ func Run(
 		return nil, err
 	}
 	return res, nil
+}
+
+// RunSubtree scans one folder inside an already scanned root, records it under
+// its own root, and reports what changed in it. It is the targeted rescan the
+// TUI's `s` runs: a folder deep in a home directory takes a moment where the
+// whole root takes minutes.
+//
+// The comparison is against the most recent recording that covers dir, which on
+// the first targeted scan is the enclosing root's last full scan narrowed to
+// dir. Comparing only against dir's own history would make the first press a
+// baseline that reports no change at all, and the interesting question — what
+// has this folder done since I last looked at the whole tree — would need two
+// presses to answer.
+//
+// enclosing is the scanned root dir sits in; pass "" or dir itself when there is
+// none, and only dir's own history is used.
+func RunSubtree(
+	ctx context.Context,
+	st *store.Store,
+	cfg config.Config,
+	dir, enclosing string,
+	onProgress func(scan.Progress),
+) (*Result, error) {
+	// Read every candidate baseline before storing, so "previous" cannot resolve
+	// to the scan in progress.
+	previous, prevDirs, err := latest(st, dir)
+	if err != nil {
+		return nil, err
+	}
+	if enclosing != "" && enclosing != dir {
+		outer, outerDirs, err := latest(st, enclosing)
+		if err != nil {
+			return nil, err
+		}
+		if outer != nil && (previous == nil || outer.StartedAt.After(previous.StartedAt)) {
+			if snap, dirs := withinSubtree(outer, outerDirs, dir); snap != nil {
+				previous, prevDirs = snap, dirs
+			}
+		}
+	}
+
+	current, err := scan.Scan(ctx, dir, cfg.ScanOptions(), onProgress)
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s: %w", dir, err)
+	}
+
+	if _, err := st.Save(current); err != nil {
+		return nil, fmt.Errorf("saving snapshot: %w", err)
+	}
+	if err := st.Prune(dir, cfg.Retention); err != nil {
+		return nil, fmt.Errorf("pruning old snapshots: %w", err)
+	}
+
+	res := build(dir, current, previous, prevDirs)
+	if err := attachHistory(st, dir, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// withinSubtree narrows a recorded snapshot to the part of it under dir, so that
+// a freshly scanned folder can be diffed against it as if it had been scanned on
+// its own. Both sides then describe the same path space, which is what keeps
+// diff.Compute's attribution — and its conservation invariant — intact.
+//
+// A dir the snapshot never recorded (it was below the size threshold, or did not
+// exist yet) yields nil: there is nothing to measure against, and an empty
+// baseline would report the whole folder as new.
+func withinSubtree(snap *model.Snapshot, dirs []model.DirStat, dir string) (*model.Snapshot, []model.DirStat) {
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	var kept []model.DirStat
+	var root *model.DirStat
+	for i, d := range dirs {
+		switch {
+		case d.Path == dir:
+			root = &dirs[i]
+		case !strings.HasPrefix(d.Path, prefix):
+			continue
+		}
+		kept = append(kept, d)
+	}
+	if root == nil {
+		return nil, nil
+	}
+
+	return &model.Snapshot{
+		ID:         snap.ID,
+		Root:       dir,
+		StartedAt:  snap.StartedAt,
+		Duration:   snap.Duration,
+		TotalUsage: root.Usage,
+		ItemCount:  root.ItemCount,
+		Dirs:       kept,
+	}, kept
 }
 
 // ErrNeedTwoScans reports that a root has fewer than the two recorded snapshots

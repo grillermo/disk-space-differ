@@ -92,7 +92,7 @@ ancestor-or-self at or above level n.
 ancestor's path is always a strict prefix, hence shorter, so a directory's height
 is final before its ancestor reads it.
 
-### Two ways to build a Result
+### Three ways to build a Result
 
 `report.Run` scans, records, and compares against the run before it.
 `report.FromStore` compares snapshots that are already recorded and **writes
@@ -106,6 +106,23 @@ giving the same answer.
 snapshots is what keeps attribution intact — a window is a different pair of
 snapshots fed to the same `diff.Compute`, never a sum of per-run deltas, which
 would double-charge directories that moved in more than one run.
+
+`report.RunSubtree` is the TUI's `s`: it scans one folder inside an already
+scanned root and records it under its own root. Its baseline is the newest
+recording that covers the folder, which on the first press is the enclosing
+root's last snapshot narrowed to that subtree (`withinSubtree`). Narrowing is
+what lets the first press report change instead of a baseline, and it is safe
+because both sides then describe the same path space, so `diff.Compute`'s
+attribution and its conservation invariant are untouched. A folder the enclosing
+snapshot never recorded yields no baseline rather than an empty one — otherwise
+every byte in it would be reported as new.
+
+The TUI holds that result alongside the roots' own. `resultFor` already prefers
+the deepest root, so the folder is read from the fresh scan and everything else
+from its root; `scopeDirs` drops any root contained in another so the nested one
+is not also ranked at the top level. `+`/`-` and `r` rebuild from the configured
+roots and drop targeted results, which is correct: the window is defined in
+recorded snapshots of a root.
 
 ### report.Result caching
 
@@ -124,8 +141,18 @@ rescanning to fill in a sparkline would be absurd.
 
 `internal/tui` is Bubble Tea; `tui.go` holds state and messages, `view.go` all
 rendering. Two orthogonal axes: `view` (growth / all changes / largest, `tab`)
-and `level` (`←` up toward the root, `→` down toward the files). Both funnel
-through `rebuildRows`, which merges every root into one ranking.
+and `focus`, the trail of folders the ranking has been narrowed to (`→` steps
+into the selected folder, `←` back out). Both funnel through `rebuildRows`,
+which ranks what each folder in `scopeDirs` holds — the focused one, or every
+scanned root at once when the trail is empty — and merges the lot into one
+ranking.
+
+The TUI has no level axis: a row is always something inside the scope carrying
+everything that changed beneath it, which `level.Index.Within` computes and which
+is the same partition `Aggregate` performs sideways. `-level` remains a `-plain`
+/`-json` flag only. A folder's own files have no child to be charged to, so they
+get a row naming the folder itself; `isFilesRow` marks it, and it refuses to be
+stepped into or deleted, since both would act on the whole folder.
 
 `enter` opens `stateInspect`, a third mode that leaves both axes behind and reads
 one directory as a tree (`inspect` is the trail of opened directories, `entries`

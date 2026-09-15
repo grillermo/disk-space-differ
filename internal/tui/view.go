@@ -53,9 +53,14 @@ func (m *Model) View() string {
 }
 
 func (m *Model) viewScanning() string {
-	root := ""
-	if m.scanningRoot < len(m.roots) {
-		root = m.roots[m.scanningRoot]
+	// A targeted scan is on one folder that is not among the configured roots, so
+	// it names itself and has no "1 of n" to count through.
+	root, counted := m.subtree, false
+	if root == "" {
+		counted = len(m.roots) > 1
+		if m.scanningRoot < len(m.roots) {
+			root = m.roots[m.scanningRoot]
+		}
 	}
 
 	var b strings.Builder
@@ -63,7 +68,7 @@ func (m *Model) viewScanning() string {
 	b.WriteString(m.spinner.View())
 	b.WriteString(titleStyle.Render(" scanning "))
 	b.WriteString(accentTxt.Render(prettyPath(root)))
-	if len(m.roots) > 1 {
+	if counted {
 		b.WriteString(subtleTxt.Render(fmt.Sprintf("  (%d/%d)", m.scanningRoot+1, len(m.roots))))
 	}
 	b.WriteString("\n\n     ")
@@ -145,7 +150,7 @@ func (m *Model) viewTable() string {
 	b.WriteString(m.renderColumnHeadings(pathWidth))
 
 	if len(m.rows) == 0 {
-		b.WriteString("\n  " + subtleTxt.Render("nothing changed since the last run") + "\n")
+		b.WriteString("\n  " + subtleTxt.Render(m.emptyTable()) + "\n")
 	} else {
 		visible := m.visibleRows()
 		end := min(m.table.offset+visible, len(m.rows))
@@ -156,6 +161,15 @@ func (m *Model) viewTable() string {
 
 	b.WriteString(m.renderFooter(m.renderHelp()))
 	return b.String()
+}
+
+// emptyTable says why there is nothing to rank, which is a different statement
+// once the table has been narrowed to a folder that simply did not move.
+func (m *Model) emptyTable() string {
+	if m.focusPath() != "" {
+		return "nothing changed inside this folder · ← to go back"
+	}
+	return "nothing changed since the last run"
 }
 
 // viewInspect reads one directory as a tree instead of as a ranking: what it
@@ -271,6 +285,14 @@ func (m *Model) entryName(e level.Entry, width int) string {
 	if !e.Files {
 		return filepath.Base(e.Path) + "/"
 	}
+	return m.filesHere(width)
+}
+
+// filesHere labels a folder's own bytes: the files sitting directly in it plus
+// every folder under it too small to have been recorded. The second part is
+// spelled out when there is room, because otherwise those bytes look
+// unaccounted for.
+func (m *Model) filesHere(width int) string {
 	name := "files here"
 	note := fmt.Sprintf("  (and folders under %s)", humanize.Bytes(m.cfg.MinDirSize))
 	if width >= len(name)+len(note) {
@@ -365,23 +387,13 @@ func (m *Model) renderColumnHeadings(pathWidth int) string {
 	return " " + headerRow.Width(max(0, m.width-2)).Render(head) + "\n"
 }
 
-// pathHeading spells out the granularity on display, because the same numbers
-// mean something different one level up.
+// pathHeading names what the ranking has been narrowed to, because the same
+// numbers mean something different inside one folder than across every root.
 func (m *Model) pathHeading() string {
-	// In the path view the rank column no longer counts down by size, so the
-	// heading has to say what the order actually is.
-	name := "PATH"
-	if m.view == viewByPath {
-		name = "PATH a→z"
+	if dir := m.focusPath(); dir != "" {
+		return "PATH · inside " + prettyPath(dir)
 	}
-	if m.maxLevel <= 1 {
-		return name
-	}
-	what := "leaf folders"
-	if m.level > 1 {
-		what = fmt.Sprintf("folders holding level %d folders", m.level-1)
-	}
-	return fmt.Sprintf("%s · level %d/%d · %s", name, m.level, m.maxLevel, what)
+	return "PATH"
 }
 
 func (m *Model) renderRow(i, pathWidth int) string {
@@ -402,7 +414,13 @@ func (m *Model) renderRow(i, pathWidth int) string {
 
 	pathText := humanize.Truncate(prettyPath(row.Path), pathWidth)
 	pathStyle := lipgloss.NewStyle().Foreground(colHeadFG)
-	if m.deleted[row.Path] {
+	switch {
+	case m.isFilesRow(row):
+		// Rendering the folder's own path here would read as the folder listing
+		// itself among its children.
+		pathText = humanize.Truncate(m.filesHere(pathWidth), pathWidth)
+		pathStyle = subtleTxt
+	case m.deleted[row.Path]:
 		pathStyle = subtleTxt.Strikethrough(true)
 	}
 	path := pathStyle.Render(pad(pathText, pathWidth))
@@ -438,8 +456,8 @@ func (m *Model) renderHelp() string {
 		position = fmt.Sprintf("%d/%d · ", m.table.cursor+1, len(m.rows))
 	}
 	return " " + helpBar.Render(position+accentTxt.Render(m.view.label())+
-		subtleTxt.Render(fmt.Sprintf(" · level %d/%d · scans %d · ↑↓ move · ←→ level · +/- scans · enter inspect · tab view · space path · d delete · o open · r rescan · q quit",
-			m.level, m.maxLevel, m.displayedScans()))) + "\n"
+		subtleTxt.Render(fmt.Sprintf(" · scans %d · ↑↓ move · → inside folder · ← back · +/- scans · enter inspect · tab view · space path · s scan folder · d delete · o open · r rescan all · q quit",
+			m.displayedScans()))) + "\n"
 }
 
 // displayedScans is how wide the window on screen actually is, which is the

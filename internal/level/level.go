@@ -180,6 +180,108 @@ func (ix *Index) Aggregate(rows []model.GrowthRow, lvl int) []model.GrowthRow {
 	return out
 }
 
+// Within charges every change recorded under dir to the one thing inside dir
+// that holds it: a child directory, or dir's own files. Drilling into a folder
+// is therefore the same partition Aggregate performs across a level — the rows
+// sum exactly to dir's own change, with nothing counted twice.
+//
+// The second return is false for a directory that was never recorded, which has
+// nothing inside it to break down rather than nothing that changed in it.
+func (ix *Index) Within(rows []model.GrowthRow, dir string) ([]model.GrowthRow, bool) {
+	n, ok := ix.nodes[dir]
+	if !ok {
+		return nil, false
+	}
+
+	sums := make(map[string]int64, len(rows))
+	reps := make([]string, 0, len(rows))
+	for _, r := range rows {
+		rep, inside := ix.childContaining(dir, r.Path)
+		if !inside {
+			continue
+		}
+		if _, seen := sums[rep]; !seen {
+			reps = append(reps, rep)
+		}
+		sums[rep] += r.Delta
+	}
+
+	out := make([]model.GrowthRow, 0, len(reps))
+	for _, rep := range reps {
+		if sums[rep] == 0 {
+			continue
+		}
+		if rep == dir {
+			out = append(out, filesRow(dir, n, sums[rep]))
+			continue
+		}
+		out = append(out, ix.row(rep, sums[rep]))
+	}
+	sortByAbsDelta(out)
+	return out, true
+}
+
+// childContaining returns the thing inside dir that path belongs to: the child
+// of dir that contains it, or dir itself when path is dir, whose change is its
+// own files rather than any child's.
+//
+// The walk goes by nearest recorded ancestor rather than by parent path for the
+// same reason childIndex does: the directories in between may be below the scan
+// threshold and so were never recorded.
+func (ix *Index) childContaining(dir, path string) (string, bool) {
+	if path == dir {
+		return dir, true
+	}
+	for p := path; ; {
+		anc, ok := ix.ancestor(p)
+		if !ok {
+			return "", false
+		}
+		if anc == dir {
+			return p, true
+		}
+		p = anc
+	}
+}
+
+// SizesWithin ranks what dir holds by the space it takes rather than by what
+// changed: one row per recorded child, plus one for dir's own files. As in
+// Sizes the size travels in Delta, because that is the number the size view
+// ranks on.
+func (ix *Index) SizesWithin(dir string) ([]model.GrowthRow, bool) {
+	entries, ok := ix.Contents(dir)
+	if !ok {
+		return nil, false
+	}
+
+	out := make([]model.GrowthRow, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, model.GrowthRow{
+			Path:         e.Path,
+			Kind:         e.Kind,
+			Delta:        e.Usage,
+			SubtreeDelta: e.Usage - e.PrevUsage,
+			Usage:        e.Usage,
+			PrevUsage:    e.PrevUsage,
+		})
+	}
+	sortBySize(out)
+	return out, true
+}
+
+// filesRow describes dir's own bytes as a row. They belong to no child, so
+// without it the breakdown of a folder would not add up to the folder.
+func filesRow(dir string, n *node, delta int64) model.GrowthRow {
+	return model.GrowthRow{
+		Path:         dir,
+		Kind:         model.Changed,
+		Delta:        delta,
+		SubtreeDelta: delta,
+		Usage:        n.selfUsage,
+		PrevUsage:    n.prevSelfUsage,
+	}
+}
+
 // Sizes ranks the level lvl directories by the bytes charged to them: everything
 // they hold that no deeper directory at the same level already accounts for.
 func (ix *Index) Sizes(lvl int) []model.GrowthRow {
@@ -195,12 +297,7 @@ func (ix *Index) Sizes(lvl int) []model.GrowthRow {
 	for rep, size := range sums {
 		out = append(out, ix.row(rep, size))
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Delta != out[j].Delta {
-			return out[i].Delta > out[j].Delta
-		}
-		return out[i].Path < out[j].Path
-	})
+	sortBySize(out)
 	return out
 }
 
@@ -327,6 +424,16 @@ func (ix *Index) kind(n *node) model.ChangeKind {
 	default:
 		return model.Changed
 	}
+}
+
+// sortBySize orders the rows whose Delta carries a size rather than a change.
+func sortBySize(rows []model.GrowthRow) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Delta != rows[j].Delta {
+			return rows[i].Delta > rows[j].Delta
+		}
+		return rows[i].Path < rows[j].Path
+	})
 }
 
 func sortByAbsDelta(rows []model.GrowthRow) {

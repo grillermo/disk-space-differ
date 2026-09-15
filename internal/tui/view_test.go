@@ -34,11 +34,21 @@ func sampleResult() *report.Result {
 			TotalUsage: 62914560, ItemCount: 32291,
 			Dirs: []model.DirStat{
 				{Path: "/tmp/sandbox", Usage: 62914560, SelfUsage: 1024},
-				{Path: "/tmp/sandbox/grower", Usage: 35651584, SelfUsage: 35651584},
+				{Path: "/tmp/sandbox/grower", Usage: 35651584, SelfUsage: 0},
+				{Path: "/tmp/sandbox/grower/deep", Usage: 35651584, SelfUsage: 0},
+				{Path: "/tmp/sandbox/grower/deep/nested", Usage: 35651584, SelfUsage: 35651584},
+				{Path: "/tmp/sandbox/newthing", Usage: 15728640, SelfUsage: 15728640},
 			},
 		},
 		Previous: &model.Snapshot{
 			Root: "/tmp/sandbox", StartedAt: now.Add(-72 * time.Hour), TotalUsage: 36700160,
+			Dirs: []model.DirStat{
+				{Path: "/tmp/sandbox", Usage: 36700160, SelfUsage: 1024},
+				{Path: "/tmp/sandbox/grower", Usage: 4194304, SelfUsage: 0},
+				{Path: "/tmp/sandbox/grower/deep", Usage: 4194304, SelfUsage: 0},
+				{Path: "/tmp/sandbox/grower/deep/nested", Usage: 4194304, SelfUsage: 4194304},
+				{Path: "/tmp/sandbox/shrinker", Usage: 20971520, SelfUsage: 20971520},
+			},
 		},
 		Rows: []model.GrowthRow{
 			{
@@ -68,7 +78,7 @@ func TestTableViewRendersRowsAndTotals(t *testing.T) {
 	for _, want := range []string{
 		"disk-space-differ",
 		"+30.0 MiB", // the deep grower, charged exclusively
-		"nested",    // its path
+		"grower",    // the folder inside the root that carries it
 		"new",       // the added-subtree tag
 		"+25.0 MiB", // root total: +30 +15 -20
 		"growth",    // active view label
@@ -93,39 +103,6 @@ func TestGrowthViewHidesShrinkageButAllChangesShowsIt(t *testing.T) {
 	}
 }
 
-// The path view is an ordering, not a different ranking: it shows the rows the
-// all-changes view would show, read top to bottom as the tree reads.
-func TestByPathViewOrdersTheSameRowsAlphabetically(t *testing.T) {
-	m := testModel(t, []*report.Result{sampleResult()})
-
-	m.view = viewAllChanges
-	m.rebuildRows()
-	byChange := map[string]bool{}
-	for _, row := range m.rows {
-		byChange[row.Path] = true
-	}
-
-	m.view = viewByPath
-	m.rebuildRows()
-
-	if len(m.rows) != len(byChange) {
-		t.Fatalf("path view has %d rows, want the %d the all-changes view has", len(m.rows), len(byChange))
-	}
-	for _, row := range m.rows {
-		if !byChange[row.Path] {
-			t.Errorf("%s appears in the path view but not in all changes", row.Path)
-		}
-	}
-	for i := 1; i < len(m.rows); i++ {
-		if m.rows[i-1].Path > m.rows[i].Path {
-			t.Errorf("rows out of path order: %s before %s", m.rows[i-1].Path, m.rows[i].Path)
-		}
-	}
-	if !strings.Contains(m.View(), "a→z") {
-		t.Error("the table should say it is ordered by path")
-	}
-}
-
 // tab must reach every view and come back round.
 func TestTabCyclesThroughEveryViewAndWrapsAround(t *testing.T) {
 	m := testModel(t, []*report.Result{sampleResult()})
@@ -136,7 +113,7 @@ func TestTabCyclesThroughEveryViewAndWrapsAround(t *testing.T) {
 		seen = append(seen, m.view.label())
 	}
 
-	want := []string{"all changes", "largest", "by path", "growth"}
+	want := []string{"all changes", "largest", "growth"}
 	if strings.Join(seen, ",") != strings.Join(want, ",") {
 		t.Errorf("tab cycled through %v, want %v", seen, want)
 	}
@@ -181,7 +158,7 @@ func TestConfirmViewNamesTargetAndSize(t *testing.T) {
 	if !strings.Contains(out, "cannot be undone") {
 		t.Error("delete confirmation must warn that it is irreversible")
 	}
-	if !strings.Contains(out, "nested") {
+	if !strings.Contains(out, "grower") {
 		t.Error("delete confirmation must name the target path")
 	}
 }

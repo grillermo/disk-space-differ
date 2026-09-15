@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/grillermo/disk-space-differ/internal/config"
+	"github.com/grillermo/disk-space-differ/internal/diff"
 	"github.com/grillermo/disk-space-differ/internal/level"
 	"github.com/grillermo/disk-space-differ/internal/model"
 	"github.com/grillermo/disk-space-differ/internal/report"
@@ -74,7 +75,6 @@ const (
 	viewGrowth viewMode = iota
 	viewAllChanges
 	viewLargest
-	viewByPath
 
 	// viewCount is not a view; it is how many there are to cycle through.
 	viewCount
@@ -86,8 +86,6 @@ func (v viewMode) label() string {
 		return "all changes"
 	case viewLargest:
 		return "largest"
-	case viewByPath:
-		return "by path"
 	default:
 		return "growth"
 	}
@@ -98,10 +96,11 @@ type (
 		rootIndex int
 		progress  scan.Progress
 	}
-	scanDoneMsg struct{ results []*report.Result }
-	scanErrMsg  struct{ err error }
-	needScanMsg struct{ roots []shortRoot }
-	storedMsg   struct {
+	scanDoneMsg    struct{ results []*report.Result }
+	subtreeDoneMsg struct{ result *report.Result }
+	scanErrMsg     struct{ err error }
+	needScanMsg    struct{ roots []shortRoot }
+	storedMsg      struct {
 		results []*report.Result
 		scans   int
 		stored  int
@@ -127,10 +126,9 @@ type Model struct {
 	results []*report.Result
 	rows    []model.GrowthRow
 
-	// level is the tree level on display, 1 being the leaf directories. maxLevel
-	// is how far up the scanned trees reach.
-	level    int
-	maxLevel int
+	// focus is the trail of folders the ranking has been narrowed to, the last
+	// one being on display. Empty means every scanned root at once.
+	focus []string
 
 	// inspect is the trail of directories opened in inspect mode, the last one
 	// being on display; entries is what it holds. Empty outside inspect mode.
@@ -147,6 +145,11 @@ type Model struct {
 
 	scanningRoot int
 	progress     scan.Progress
+
+	// subtree is the folder a targeted scan (`s`) is running on, empty while the
+	// configured roots are being scanned. The scanning screen names it, since it
+	// is not one of m.roots.
+	subtree string
 
 	deleteTarget model.GrowthRow
 	status       string
@@ -179,18 +182,16 @@ func New(cfg config.Config, st *store.Store, noScan bool, scans int) *Model {
 	sp.Style = accentTxt
 
 	return &Model{
-		cfg:      cfg,
-		store:    st,
-		roots:    cfg.ResolvedRoots(),
-		state:    stateScanning,
-		view:     viewGrowth,
-		level:    1,
-		maxLevel: 1,
-		spinner:  sp,
-		deleted:  map[string]bool{},
-		noScan:   noScan,
-		scans:    max(report.MinScans, scans),
-		stored:   report.MinScans,
+		cfg:     cfg,
+		store:   st,
+		roots:   cfg.ResolvedRoots(),
+		state:   stateScanning,
+		view:    viewGrowth,
+		spinner: sp,
+		deleted: map[string]bool{},
+		noScan:  noScan,
+		scans:   max(report.MinScans, scans),
+		stored:  report.MinScans,
 	}
 }
 
@@ -286,7 +287,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.progress = msg.progress
 		return m, nil
 
+	case subtreeDoneMsg:
+		m.subtree = ""
+		m.state = stateTable
+		// The fresh scan read a different tree from the one the inspect trail was
+		// opened on, exactly as a full rescan does.
+		m.inspect, m.entries = nil, nil
+		m.adoptResult(msg.result)
+		m.focusScanned(msg.result)
+		return m, nil
+
 	case scanDoneMsg:
+		m.subtree = ""
 		m.results = msg.results
 		// A rescan replaces the tree the inspect trail was reading, so it starts
 		// again from the fresh table rather than from stale contents.
@@ -394,10 +406,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.view = (m.view + 1) % viewCount
 		m.table.reset()
 		m.rebuildRows()
-	case "left", "h":
-		m.setLevel(m.level + 1)
 	case "right", "l":
-		m.setLevel(m.level - 1)
+		m.descendScope()
+	case "left", "h":
+		m.ascendScope()
 	case "+", "=":
 		// The window is widened optimistically; the load clamps it to what the
 		// history actually holds and says so.
@@ -414,6 +426,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.state = stateScanning
 		m.progress = scan.Progress{}
 		return tea.Batch(m.spinner.Tick, m.scanCmd())
+	case "s":
+		return m.scanSelected()
 	case "o":
 		return m.openCmd()
 	case "d", "delete":
@@ -477,6 +491,83 @@ func (m *Model) handleInspectKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// scanSelected rescans just the highlighted folder and narrows the ranking into
+// the result, which is the cheap way to find out whether something has moved
+// down there: a folder is seconds where its whole root is minutes.
+func (m *Model) scanSelected() tea.Cmd {
+	row, ok := m.selectedRow()
+	if !ok {
+		return nil
+	}
+	// The own-files row names the folder being broken down, so scanning it would
+	// rescan the scope rather than something inside it.
+	if m.isFilesRow(row) {
+		m.status = "that row is this folder's own files, not a folder"
+		return nil
+	}
+	if m.deleted[row.Path] {
+		m.status = "deleted this session"
+		return nil
+	}
+
+	enclosing := ""
+	if res, ok := m.resultFor(row.Path); ok {
+		enclosing = res.Root
+	}
+
+	m.subtree = row.Path
+	m.state = stateScanning
+	m.progress = scan.Progress{}
+	return tea.Batch(m.spinner.Tick, m.subtreeCmd(row.Path, enclosing))
+}
+
+// subtreeCmd scans one folder in the background, reporting it against whatever
+// last recorded it — see report.RunSubtree.
+func (m *Model) subtreeCmd(dir, enclosing string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := report.RunSubtree(context.Background(), m.store, m.cfg, dir, enclosing,
+			func(p scan.Progress) {
+				if m.prog != nil {
+					m.prog.Send(progressMsg{progress: p})
+				}
+			})
+		if err != nil {
+			return scanErrMsg{err}
+		}
+		return subtreeDoneMsg{result: res}
+	}
+}
+
+// adoptResult adds a targeted scan's result to the ones on display, replacing an
+// earlier scan of the same folder. resultFor prefers the deepest root, so from
+// here on everything inside that folder is read from the fresh scan while the
+// rest of the tree keeps being read from its root's.
+func (m *Model) adoptResult(res *report.Result) {
+	for i, existing := range m.results {
+		if existing.Root == res.Root {
+			m.results[i] = res
+			return
+		}
+	}
+	m.results = append(m.results, res)
+}
+
+// focusScanned narrows the table into the folder that was just scanned, so the
+// fresh numbers are what is on screen. `←` backs out of it the same as any other
+// step in, landing on the row it was scanned from.
+func (m *Model) focusScanned(res *report.Result) {
+	if m.focusPath() != res.Root {
+		m.focus = append(m.focus, res.Root)
+	}
+	m.table.reset()
+	m.rebuildRows()
+	if res.Baseline {
+		m.status = "nothing recorded to compare " + prettyPath(res.Root) + " against yet"
+	} else {
+		m.status = "scanned " + prettyPath(res.Root)
+	}
 }
 
 // beginInspect opens the selected row as a directory, listing what it holds
@@ -605,6 +696,12 @@ func (m *Model) beginDelete() {
 	if !ok {
 		return
 	}
+	// The own-files row names the folder it is a breakdown of, so deleting it
+	// would take the whole folder rather than the bytes the row describes.
+	if m.isFilesRow(row) {
+		m.status = "that row is this folder's own files, not a folder"
+		return
+	}
 	if m.deleted[row.Path] {
 		m.status = "already deleted"
 		return
@@ -665,47 +762,165 @@ func (m *Model) selectedRow() (model.GrowthRow, bool) {
 	return m.rows[m.table.cursor], true
 }
 
-// setLevel moves the report up or down the tree, staying inside the levels the
-// scanned trees actually have.
-func (m *Model) setLevel(lvl int) {
-	lvl = clampInt(lvl, 1, max(1, m.maxLevel))
-	if lvl == m.level {
+// descendScope narrows the ranking to the selected folder, charging everything
+// that changed anywhere inside it to the one child holding it. It is what `→`
+// does, and what lets the ranking be walked as a tree without leaving it.
+func (m *Model) descendScope() {
+	row, ok := m.selectedRow()
+	if !ok {
 		return
 	}
-	m.level = lvl
+	if m.isFilesRow(row) {
+		m.status = "that row is this folder's own files, not a folder"
+		return
+	}
+	if !m.hasSubdirs(row.Path) {
+		m.status = "nothing recorded inside " + prettyPath(row.Path)
+		return
+	}
+
+	m.focus = append(m.focus, row.Path)
 	m.table.reset()
 	m.rebuildRows()
 }
 
-// refreshLevels recomputes how far up the tree the report can be read, keeping
-// the selected level inside it after a rescan.
-func (m *Model) refreshLevels() {
-	m.maxLevel = 1
-	for _, res := range m.results {
-		m.maxLevel = max(m.maxLevel, res.MaxLevel())
+// ascendScope widens the ranking back out, landing on the row it was narrowed
+// from so that stepping in and out again is a round trip.
+func (m *Model) ascendScope() {
+	if len(m.focus) == 0 {
+		m.status = "already showing every scanned root"
+		return
 	}
-	m.level = clampInt(max(1, m.level), 1, m.maxLevel)
+
+	came := m.focus[len(m.focus)-1]
+	m.focus = m.focus[:len(m.focus)-1]
+	m.table.reset()
+	m.rebuildRows()
+	m.selectPath(came)
 }
 
-// rebuildRows merges every root's rows into a single ranking for the current
-// view at the current level.
-func (m *Model) rebuildRows() {
-	m.refreshLevels()
+// focusPath is the folder the ranking is narrowed to, empty when it spans every
+// scanned root.
+func (m *Model) focusPath() string {
+	if len(m.focus) == 0 {
+		return ""
+	}
+	return m.focus[len(m.focus)-1]
+}
 
-	// Each root is asked for enough rows that no single root can crowd the
-	// others out of the merged ranking.
-	budget := m.cfg.Top*len(m.results) + m.cfg.Top
+// scopeDirs are the folders being broken down: the focused one, or every
+// scanned root at once while the table has not been narrowed yet. Starting at
+// the roots rather than at the leaves is what gives `→` something to walk down
+// into.
+//
+// A root sitting inside another one is left out: its contents are already
+// ranked under the wider root, and listing both would charge the same bytes
+// twice. A targeted scan (`s`) adds exactly such a nested root.
+func (m *Model) scopeDirs() []string {
+	if dir := m.focusPath(); dir != "" {
+		return []string{dir}
+	}
+	roots := make([]string, 0, len(m.results))
+	for _, res := range m.results {
+		if m.nestedRoot(res.Root) {
+			continue
+		}
+		roots = append(roots, res.Root)
+	}
+	return roots
+}
+
+// nestedRoot reports whether another scanned root contains this one.
+func (m *Model) nestedRoot(root string) bool {
+	for _, other := range m.results {
+		if other.Root != root && underRoot(root, other.Root) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFilesRow reports whether row stands for the bytes of the folder being broken
+// down rather than for something inside it. It names that folder, so there is
+// nothing below it to open and nothing separate from it to delete.
+func (m *Model) isFilesRow(row model.GrowthRow) bool {
+	for _, dir := range m.scopeDirs() {
+		if row.Path == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSubdirs reports whether path holds anything recorded to break it down
+// into. A folder holding only its own files would narrow to a single row
+// describing itself, which is not a drill-down.
+func (m *Model) hasSubdirs(path string) bool {
+	entries, ok := m.contentsOf(path)
+	if !ok {
+		return false
+	}
+	for _, e := range entries {
+		if !e.Files {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneFocus drops trail entries the current results do not record. A rescan or
+// a wider window is a different pair of snapshots, and a folder missing from
+// them cannot be broken down, so the ranking backs out to one that can.
+func (m *Model) pruneFocus() {
+	for len(m.focus) > 0 {
+		if _, ok := m.contentsOf(m.focusPath()); ok {
+			return
+		}
+		m.focus = m.focus[:len(m.focus)-1]
+	}
+}
+
+// selectPath puts the cursor on path, leaving it where it is if the row is gone
+// — which it is whenever the folder we came from no longer ranks in this view.
+func (m *Model) selectPath(path string) {
+	for i, row := range m.rows {
+		if row.Path == path {
+			m.table.move(i, len(m.rows), m.visibleRows())
+			return
+		}
+	}
+}
+
+// rowsInside ranks what one folder holds: one row per child, carrying every
+// change recorded anywhere beneath it, plus one row for the folder's own files.
+func (m *Model) rowsInside(dir string) []model.GrowthRow {
+	res, ok := m.resultFor(dir)
+	if !ok {
+		return nil
+	}
+
+	if m.view == viewLargest {
+		rows, _ := res.SizesWithin(dir)
+		return rows[:min(len(rows), m.cfg.Top)]
+	}
+
+	rows, _ := res.Within(dir)
+	if m.view == viewAllChanges {
+		return diff.TopChanges(rows, m.cfg.Top)
+	}
+	return diff.TopGrowth(rows, m.cfg.Top)
+}
+
+// rebuildRows ranks what the current scope holds — the focused folder, or every
+// scanned root merged into one ranking. A row is always one folder inside the
+// scope carrying everything that changed beneath it, so `→` and `←` walk the
+// tree without the numbers ever changing meaning.
+func (m *Model) rebuildRows() {
+	m.pruneFocus()
 
 	var all []model.GrowthRow
-	for _, res := range m.results {
-		switch m.view {
-		case viewLargest:
-			all = append(all, res.Largest(m.level, budget)...)
-		case viewAllChanges, viewByPath:
-			all = append(all, res.Changes(m.level, budget)...)
-		default:
-			all = append(all, res.Growth(m.level, budget)...)
-		}
+	for _, dir := range m.scopeDirs() {
+		all = append(all, m.rowsInside(dir)...)
 	}
 
 	sort.Slice(all, func(i, j int) bool {
@@ -718,13 +933,6 @@ func (m *Model) rebuildRows() {
 
 	if len(all) > m.cfg.Top {
 		all = all[:m.cfg.Top]
-	}
-
-	// Which rows make the cut is still decided by change; the path view only
-	// reorders the survivors. Selecting alphabetically instead would fill the
-	// table with whatever happens to sort first, which nobody asked to see.
-	if m.view == viewByPath {
-		sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
 	}
 
 	m.rows = all

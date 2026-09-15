@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/grillermo/disk-space-differ/internal/model"
 	"github.com/grillermo/disk-space-differ/internal/report"
 )
 
@@ -15,10 +16,10 @@ func inspecting(t *testing.T) *Model {
 	t.Helper()
 
 	m := testModel(t, []*report.Result{layeredResult()})
-	m.setLevel(m.maxLevel)
-	if got := m.rows[0].Path; got != "/tmp/sandbox" {
-		t.Fatalf("top row at the coarsest level = %s, want the scan root", got)
-	}
+	// Inspect opens whatever row is selected. The scan root is never a row of its
+	// own — the table starts at what the roots hold — so it is selected directly
+	// here, being the folder in this tree with the most to browse through.
+	m.rows = []model.GrowthRow{{Path: "/tmp/sandbox"}}
 
 	press(m, tea.KeyEnter)
 	if m.state != stateInspect {
