@@ -97,10 +97,16 @@ type (
 		progress  scan.Progress
 	}
 	scanDoneMsg    struct{ results []*report.Result }
-	subtreeDoneMsg struct{ result *report.Result }
-	scanErrMsg     struct{ err error }
-	needScanMsg    struct{ roots []shortRoot }
-	storedMsg      struct {
+	subtreeDoneMsg struct {
+		result *report.Result
+		// keepScope leaves the ranking where it is instead of narrowing into the
+		// folder that was scanned. A scan the user did not ask for — the one that
+		// follows a deletion — must not move them somewhere else.
+		keepScope bool
+	}
+	scanErrMsg  struct{ err error }
+	needScanMsg struct{ roots []shortRoot }
+	storedMsg   struct {
 		results []*report.Result
 		scans   int
 		stored  int
@@ -294,6 +300,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// opened on, exactly as a full rescan does.
 		m.inspect, m.entries = nil, nil
 		m.adoptResult(msg.result)
+		if msg.keepScope {
+			m.rebuildRows()
+			return m, nil
+		}
 		m.focusScanned(msg.result)
 		return m, nil
 
@@ -356,7 +366,25 @@ func (m *Model) handleDeleted(msg deletedMsg) tea.Cmd {
 	}
 	m.deleted[msg.path] = true
 	m.status = fmt.Sprintf("deleted %s", msg.path)
-	return nil
+	return m.rescanContaining(msg.path)
+}
+
+// rescanContaining measures the folder a deletion emptied out again, so the
+// ranking stops describing a tree that no longer exists and the freed bytes show
+// up as the change they are. The containing folder is always one the scan
+// recorded — a directory is never smaller than what it holds, so anything that
+// could be ranked cleared the threshold too — and reading it is seconds where its
+// whole root is minutes.
+func (m *Model) rescanContaining(path string) tea.Cmd {
+	parent := filepath.Dir(path)
+	res, ok := m.resultFor(parent)
+	if !ok {
+		return nil
+	}
+	m.subtree = parent
+	m.state = stateScanning
+	m.progress = scan.Progress{}
+	return tea.Batch(m.spinner.Tick, m.subtreeCmd(parent, res.Root, true))
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
@@ -520,12 +548,12 @@ func (m *Model) scanSelected() tea.Cmd {
 	m.subtree = row.Path
 	m.state = stateScanning
 	m.progress = scan.Progress{}
-	return tea.Batch(m.spinner.Tick, m.subtreeCmd(row.Path, enclosing))
+	return tea.Batch(m.spinner.Tick, m.subtreeCmd(row.Path, enclosing, false))
 }
 
 // subtreeCmd scans one folder in the background, reporting it against whatever
 // last recorded it — see report.RunSubtree.
-func (m *Model) subtreeCmd(dir, enclosing string) tea.Cmd {
+func (m *Model) subtreeCmd(dir, enclosing string, keepScope bool) tea.Cmd {
 	return func() tea.Msg {
 		res, err := report.RunSubtree(context.Background(), m.store, m.cfg, dir, enclosing,
 			func(p scan.Progress) {
@@ -536,7 +564,7 @@ func (m *Model) subtreeCmd(dir, enclosing string) tea.Cmd {
 		if err != nil {
 			return scanErrMsg{err}
 		}
-		return subtreeDoneMsg{result: res}
+		return subtreeDoneMsg{result: res, keepScope: keepScope}
 	}
 }
 

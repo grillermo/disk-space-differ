@@ -111,3 +111,38 @@ func TestTheOwnFilesRowCannotBeScanned(t *testing.T) {
 		t.Errorf("state %v, want to stay on the table", m.state)
 	}
 }
+
+// A deletion changes the tree under the folder that held it, so the numbers on
+// screen are stale the moment it succeeds: the containing folder is measured
+// again without being asked for.
+func TestDeletingAFolderRescansTheOneThatHeldIt(t *testing.T) {
+	m := testModel(t, []*report.Result{layeredResult()})
+
+	cmd := m.handleDeleted(deletedMsg{path: "/tmp/sandbox/grower/deep/nested", freed: 35651584})
+
+	if cmd == nil {
+		t.Fatal("deleting a folder started no rescan of the folder that held it")
+	}
+	if m.subtree != "/tmp/sandbox/grower/deep" {
+		t.Errorf("rescanning %q, want the folder the deleted one was in", m.subtree)
+	}
+	if m.state != stateScanning {
+		t.Errorf("state %v after a delete, want the scanning screen", m.state)
+	}
+}
+
+// The rescan is a consequence of the deletion, not a place the user asked to go,
+// so it leaves the ranking narrowed where it already was.
+func TestTheRescanAfterADeleteLeavesTheScopeAlone(t *testing.T) {
+	m := testModel(t, []*report.Result{layeredResult()})
+	m.handleDeleted(deletedMsg{path: "/tmp/sandbox/grower/fresh"})
+
+	m.Update(subtreeDoneMsg{result: growerResult(), keepScope: true})
+
+	if len(m.focus) != 0 {
+		t.Errorf("the rescan narrowed the ranking to %v, want the scope untouched", m.focus)
+	}
+	if m.status != "deleted /tmp/sandbox/grower/fresh" {
+		t.Errorf("status %q, want the deletion still reported", m.status)
+	}
+}
