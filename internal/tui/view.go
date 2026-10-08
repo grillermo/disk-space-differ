@@ -144,7 +144,7 @@ func (m *Model) viewTable() string {
 
 	b.WriteString(m.renderHeader())
 	b.WriteString(m.renderSummaries())
-	b.WriteString("\n")
+	b.WriteString(m.renderQueryLine())
 
 	pathWidth := m.pathWidth()
 	b.WriteString(m.renderColumnHeadings(pathWidth))
@@ -166,6 +166,9 @@ func (m *Model) viewTable() string {
 // emptyTable says why there is nothing to rank, which is a different statement
 // once the table has been narrowed to a folder that simply did not move.
 func (m *Model) emptyTable() string {
+	if len(m.ranked) > 0 {
+		return "no rows match the filter · esc to clear it"
+	}
 	if m.focusPath() != "" {
 		return "nothing changed inside this folder · ← to go back"
 	}
@@ -182,13 +185,17 @@ func (m *Model) viewInspect() string {
 
 	b.WriteString(m.renderHeader())
 	b.WriteString(m.renderInspectSummary())
-	b.WriteString("\n")
+	b.WriteString(m.renderQueryLine())
 
 	nameWidth := m.nameWidth()
 	b.WriteString(m.renderInspectHeadings(nameWidth))
 
 	if len(m.entries) == 0 {
-		b.WriteString("\n  " + subtleTxt.Render("nothing recorded in this folder") + "\n")
+		empty := "nothing recorded in this folder"
+		if len(m.contents) > 0 {
+			empty = "no rows match the filter · esc to clear it"
+		}
+		b.WriteString("\n  " + subtleTxt.Render(empty) + "\n")
 	} else {
 		total := m.inspectUsage()
 		visible := m.visibleEntries()
@@ -218,7 +225,7 @@ func (m *Model) renderInspectSummary() string {
 		change,
 		lipgloss.NewStyle().Foreground(colHeadFG).Render(
 			pad(prettyPath(m.inspectPath()), max(18, m.nameWidth()))),
-		subtleTxt.Render(fmt.Sprintf("%s here · %d items", humanize.Bytes(usage), len(m.entries))),
+		subtleTxt.Render(fmt.Sprintf("%s here · %d items", humanize.Bytes(usage), len(m.contents))),
 	)
 	return " " + summaryBox.Render(line) + "\n"
 }
@@ -455,9 +462,36 @@ func (m *Model) renderHelp() string {
 	if len(m.rows) > 0 {
 		position = fmt.Sprintf("%d/%d · ", m.table.cursor+1, len(m.rows))
 	}
+	if m.filter.editing {
+		return " " + helpBar.Render(position+accentTxt.Render("filter")+
+			subtleTxt.Render(" · "+filterKeys+" · enter inspect")) + "\n"
+	}
 	return " " + helpBar.Render(position+accentTxt.Render(m.view.label())+
-		subtleTxt.Render(fmt.Sprintf(" · scans %d · ↑↓ move · → inside folder · ← back · +/- scans · enter inspect · tab view · space path · s scan folder · d delete · o open · r rescan all · q quit",
+		subtleTxt.Render(fmt.Sprintf(" · scans %d · ↑↓ move · → inside folder · ← back · +/- scans · enter inspect · / filter · tab view · space path · s scan folder · d delete · o open · r rescan all · q quit",
 			m.displayedScans()))) + "\n"
+}
+
+// filterKeys are the editing keys offered while the query has the keyboard.
+// The list's own letter keys are not, because they type into the query.
+const filterKeys = "↑↓ move · esc clear filter · ctrl+w delete word · tab back to list"
+
+// renderQueryLine takes the blank line under the summaries while a filter is
+// being typed or is hiding rows, so the list does not lose a row to it.
+func (m *Model) renderQueryLine() string {
+	if !m.filter.shown() {
+		return "\n"
+	}
+	q, pos := m.filter.query, m.filter.pos
+	text := string(q)
+	if m.filter.editing {
+		// The cursor sits on the rune it would insert before, or past the end.
+		under, after := " ", ""
+		if pos < len(q) {
+			under, after = string(q[pos]), string(q[pos+1:])
+		}
+		text = string(q[:pos]) + lipgloss.NewStyle().Reverse(true).Render(under) + after
+	}
+	return " " + accentTxt.Render("/ ") + text + "\n"
 }
 
 // displayedScans is how wide the window on screen actually is, which is the
@@ -474,8 +508,12 @@ func (m *Model) renderInspectHelp() string {
 	if len(m.entries) > 0 {
 		position = fmt.Sprintf("%d/%d · ", m.browse.cursor+1, len(m.entries))
 	}
+	if m.filter.editing {
+		return " " + helpBar.Render(position+accentTxt.Render("filter")+
+			subtleTxt.Render(" · "+filterKeys+" · enter open folder")) + "\n"
+	}
 	return " " + helpBar.Render(position+accentTxt.Render("inspect")+
-		subtleTxt.Render(" · ↑↓ move · enter open folder · ← back · esc leave · space path · o reveal · q quit")) + "\n"
+		subtleTxt.Render(" · ↑↓ move · enter open folder · ← back · / filter · esc leave · space path · o reveal · q quit")) + "\n"
 }
 
 // visibleRows is how many table rows fit below the fixed chrome.
@@ -516,7 +554,7 @@ func (m *Model) nameWidth() int {
 // disagree with the rows above them.
 func (m *Model) inspectUsage() int64 {
 	var total int64
-	for _, e := range m.entries {
+	for _, e := range m.contents {
 		total += e.Usage
 	}
 	return total
@@ -524,7 +562,7 @@ func (m *Model) inspectUsage() int64 {
 
 func (m *Model) inspectPrevUsage() int64 {
 	var total int64
-	for _, e := range m.entries {
+	for _, e := range m.contents {
 		total += e.PrevUsage
 	}
 	return total

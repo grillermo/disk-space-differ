@@ -182,6 +182,12 @@ program, so `handleKey` dispatches on state *before* the global quit keys. The
 table and the inspect listing keep separate `scroll` cursors so that leaving a
 directory lands back on the row that opened it.
 
+`/` filters whichever list is on screen (`filter.go`, same keys as chicle).
+It only hides rows: `ranked`/`contents` hold the full list and `rows`/`entries`
+what the filter lets through, so inspect totals and share bars are summed from
+`contents`. The filter is dropped whenever the list is replaced by another
+folder's (`→`, `←`, `enter`, `s`).
+
 Scans run on a background goroutine and push `progressMsg` through the
 `*tea.Program` handle set by `SetProgram`. A rescan drops the inspect trail: it
 replaces the tree those paths were read from.

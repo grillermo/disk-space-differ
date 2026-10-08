@@ -130,16 +130,26 @@ type Model struct {
 	spinner spinner.Model
 
 	results []*report.Result
-	rows    []model.GrowthRow
+
+	// ranked is the full ranking of the current scope; rows is the part of it
+	// the filter lets through, and is what the cursor moves over.
+	ranked []model.GrowthRow
+	rows   []model.GrowthRow
 
 	// focus is the trail of folders the ranking has been narrowed to, the last
 	// one being on display. Empty means every scanned root at once.
 	focus []string
 
 	// inspect is the trail of directories opened in inspect mode, the last one
-	// being on display; entries is what it holds. Empty outside inspect mode.
-	inspect []string
-	entries []level.Entry
+	// being on display; contents is what it holds and entries the part of that
+	// the filter lets through. Empty outside inspect mode.
+	inspect  []string
+	contents []level.Entry
+	entries  []level.Entry
+
+	// filter narrows whichever list is on screen, the table or the inspect
+	// listing. One is enough: it is dropped whenever the list changes.
+	filter filter
 
 	// The table and the inspect listing keep their own cursors, so that leaving
 	// a directory puts you back on the row you opened it from.
@@ -298,7 +308,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateTable
 		// The fresh scan read a different tree from the one the inspect trail was
 		// opened on, exactly as a full rescan does.
-		m.inspect, m.entries = nil, nil
+		m.inspect, m.contents, m.entries = nil, nil, nil
 		m.adoptResult(msg.result)
 		if msg.keepScope {
 			m.rebuildRows()
@@ -312,7 +322,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.results = msg.results
 		// A rescan replaces the tree the inspect trail was reading, so it starts
 		// again from the fresh table rather than from stale contents.
-		m.inspect, m.entries = nil, nil
+		m.inspect, m.contents, m.entries = nil, nil, nil
 		m.state = stateTable
 		m.table.reset()
 		m.browse.reset()
@@ -405,8 +415,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	// While the query has the keyboard, q and esc are text and editing keys,
+	// not the global quit.
+	if m.state == stateTable && m.filter.editing {
+		if cmd, done := m.handleFilterKey(msg); done {
+			return cmd
+		}
+	}
+
 	switch msg.String() {
-	case "q", "ctrl+c", "esc":
+	case "esc":
+		// A filter on screen is cleared first: quitting and losing the query to
+		// the same keystroke is never what was meant.
+		if m.state == stateTable && m.filter.shown() {
+			m.filter.clear()
+			m.queryChanged()
+			return nil
+		}
+		return tea.Quit
+	case "q", "ctrl+c":
 		return tea.Quit
 	}
 
@@ -430,6 +457,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.moveCursor(len(m.rows))
 	case "enter":
 		m.beginInspect()
+	case "/":
+		m.startFilter()
 	case "tab":
 		m.view = (m.view + 1) % viewCount
 		m.table.reset()
@@ -487,11 +516,24 @@ func (m *Model) handleInspectKey(msg tea.KeyMsg) tea.Cmd {
 	m.status = ""
 	visible := m.visibleEntries()
 
+	if m.filter.editing {
+		if cmd, done := m.handleFilterKey(msg); done {
+			return cmd
+		}
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return tea.Quit
 	case "esc":
+		if m.filter.shown() {
+			m.filter.clear()
+			m.queryChanged()
+			return nil
+		}
 		m.leaveInspect()
+	case "/":
+		m.startFilter()
 	case "up", "k":
 		m.browse.move(-1, len(m.entries), visible)
 	case "down", "j":
@@ -588,6 +630,7 @@ func (m *Model) adoptResult(res *report.Result) {
 func (m *Model) focusScanned(res *report.Result) {
 	if m.focusPath() != res.Root {
 		m.focus = append(m.focus, res.Root)
+		m.dropFilter()
 	}
 	m.table.reset()
 	m.rebuildRows()
@@ -612,10 +655,21 @@ func (m *Model) beginInspect() {
 	m.state = stateInspect
 }
 
+// leaveInspect returns to the table on the row inspect mode was opened from.
+// Opening it dropped the table's filter, so the row may have moved.
 func (m *Model) leaveInspect() {
+	opened := ""
+	if len(m.inspect) > 0 {
+		opened = m.inspect[0]
+	}
 	m.state = stateTable
-	m.inspect, m.entries = nil, nil
+	m.inspect, m.contents, m.entries = nil, nil, nil
 	m.status = ""
+	m.applyRowFilter()
+	if opened != "" {
+		m.table.reset()
+		m.selectPath(opened)
+	}
 }
 
 // descend opens the selected subdirectory. The file group stands for bytes, not
@@ -651,11 +705,13 @@ func (m *Model) ascend() {
 		return
 	}
 
-	m.entries = entries
+	m.dropFilter()
+	m.contents = entries
+	m.applyEntryFilter()
 	m.browse.reset()
-	for i, e := range entries {
+	for i, e := range m.entries {
 		if !e.Files && e.Path == came {
-			m.browse.move(i, len(entries), m.visibleEntries())
+			m.browse.move(i, len(m.entries), m.visibleEntries())
 			break
 		}
 	}
@@ -669,7 +725,9 @@ func (m *Model) enterDir(path string) bool {
 		return false
 	}
 	m.inspect = append(m.inspect, path)
-	m.entries = entries
+	m.dropFilter()
+	m.contents = entries
+	m.applyEntryFilter()
 	m.browse.reset()
 	return true
 }
@@ -808,6 +866,7 @@ func (m *Model) descendScope() {
 	}
 
 	m.focus = append(m.focus, row.Path)
+	m.dropFilter()
 	m.table.reset()
 	m.rebuildRows()
 }
@@ -822,6 +881,7 @@ func (m *Model) ascendScope() {
 
 	came := m.focus[len(m.focus)-1]
 	m.focus = m.focus[:len(m.focus)-1]
+	m.dropFilter()
 	m.table.reset()
 	m.rebuildRows()
 	m.selectPath(came)
@@ -963,8 +1023,8 @@ func (m *Model) rebuildRows() {
 		all = all[:m.cfg.Top]
 	}
 
-	m.rows = all
-	m.clampScroll()
+	m.ranked = all
+	m.applyRowFilter()
 }
 
 func clampInt(v, lo, hi int) int {
