@@ -24,8 +24,8 @@ rm -rf /tmp/t && cp -r /tmp/t.bak /tmp/t       # restore before each comparison 
 dsd -plain -level 3 -db /tmp/t/s.db -root /tmp/tree
 ```
 
-Go 1.26. Only stdlib plus bubbletea/lipgloss, gdu (scanner, used as a library)
-and modernc.org/sqlite (pure Go, no cgo).
+Go 1.26. Only stdlib plus bubbletea/lipgloss and modernc.org/sqlite (pure Go,
+no cgo; `./build` sets `CGO_ENABLED=0`).
 
 ## Architecture
 
@@ -65,6 +65,27 @@ sizes: one entry per recorded subdirectory plus one for the directory's own
 `SelfUsage`, summing to the directory's own usage. It answers "what is in here",
 not "what changed", and its numbers must never be summed across nesting levels or
 mixed into a ranking.
+
+### Scanning
+
+`scan` has its own parallel walker (`walk.go`). It keeps only directories, never
+individual files, and counts allocated bytes. On macOS, `readdir_darwin.go` reads
+each directory with `getattrlistbulk(2)`: one call returns the names, types and
+sizes of a whole batch of entries, where readdir+lstat would cost a syscall per
+file. The call goes through libSystem via a `cgo_import_dynamic` trampoline
+(`readdir_darwin.s`), the same way `x/sys/unix` does it, so the build stays
+cgo-free. Other platforms and filesystems without bulk attributes use
+`readDirPortable`. `TestPlatformReaderAgreesWithPortableReader` pins the
+hand-decoded record layout. `ATTR_CMN_ERROR` is packed straight after the
+returned-attribute set, not in bit order, and a directory's record has no file
+attributes.
+
+Two details are load-bearing. A hard-linked file is charged to the
+lexicographically smallest directory holding a link, so the charge doesn't move
+between scans. Opening a directory inside another app's `~/Library/Containers`
+sometimes blocks for 5–6 s on a macOS data protection check and returns `EINTR`.
+`openDir` retries it, because giving up would drop a different directory from
+every snapshot.
 
 ### Directories below the threshold are not recorded
 
@@ -165,16 +186,12 @@ Scans run on a background goroutine and push `progressMsg` through the
 `*tea.Program` handle set by `SetProgram`. A rescan drops the inspect trail: it
 replaces the tree those paths were read from.
 
-`scan`'s `init()` discards logrus output. gdu logs every unreadable path at info
-level, which would otherwise be painted straight over the alternate screen —
-unreadable entries are counted into `Snapshot.Unreadable` and reported instead.
-
 ## Conventions
 
 Comments explain *why*, never what the code plainly says. Package and exported
 doc comments state the invariant the code exists to uphold, and non-obvious
 choices carry the reasoning that would otherwise be lost (why height and not
-depth, why `head()` shares storage, why logrus is silenced). Match this density;
+depth, why `head()` shares storage, why `openDir` retries `EINTR`). Match this density;
 it is the dominant style throughout.
 
 Test names are sentences describing the behaviour being guarded

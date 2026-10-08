@@ -1,30 +1,16 @@
-// Package scan walks a directory tree with gdu's parallel analyzer and turns
-// the result into snapshot rows.
+// Package scan walks a directory tree in parallel and turns the result into
+// snapshot rows.
 package scan
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/dundee/gdu/v5/pkg/analyze"
-	gdufs "github.com/dundee/gdu/v5/pkg/fs"
-	log "github.com/sirupsen/logrus"
-
 	"github.com/grillermo/disk-space-differ/internal/model"
 )
-
-// gdu logs unreadable paths to stderr through logrus at info level. On a home
-// directory that is hundreds of lines of noise, and in the TUI it is written
-// straight over the alternate screen. Unreadable entries are counted and
-// reported instead, so the log output is discarded here rather than at the call
-// site, where forgetting it would corrupt the display.
-func init() {
-	log.SetOutput(io.Discard)
-}
 
 // DefaultMinDirSize is the smallest cumulative size a directory needs before it
 // is recorded on its own row. Smaller directories are folded into their nearest
@@ -62,6 +48,9 @@ func (o Options) minDirSize() int64 {
 // Scan walks root and returns a snapshot. onProgress may be nil; when set it is
 // called roughly every 100ms on a separate goroutine.
 //
+// Usage is allocated bytes, not apparent size, so sparse and compressed files
+// count for what they actually take on disk. A hard-linked file is counted once.
+//
 // Cancelling ctx stops the walk and returns ctx.Err().
 func Scan(ctx context.Context, root string, opts Options, onProgress func(Progress)) (*model.Snapshot, error) {
 	absRoot, err := filepath.Abs(root)
@@ -69,17 +58,10 @@ func Scan(ctx context.Context, root string, opts Options, onProgress func(Progre
 		return nil, err
 	}
 
-	analyzer := analyze.CreateAnalyzer()
-	analyzer.SetFollowSymlinks(opts.FollowSymlinks)
+	w := newWalker(ctx, ignoreFunc(opts), opts.FollowSymlinks)
 
 	stop := make(chan struct{})
 	defer close(stop)
-
-	go func() {
-		<-ctx.Done()
-		analyzer.Cancel()
-	}()
-
 	if onProgress != nil {
 		go func() {
 			ticker := time.NewTicker(100 * time.Millisecond)
@@ -89,41 +71,33 @@ func Scan(ctx context.Context, root string, opts Options, onProgress func(Progre
 				case <-stop:
 					return
 				case <-ticker.C:
-					p := analyzer.GetProgress()
-					onProgress(Progress{
-						ItemCount:   p.ItemCount,
-						TotalUsage:  p.TotalUsage,
-						CurrentItem: p.CurrentItemName,
-					})
+					p := Progress{ItemCount: w.items.Load(), TotalUsage: w.usage.Load()}
+					if cur := w.current.Load(); cur != nil {
+						p.CurrentItem = *cur
+					}
+					onProgress(p)
 				}
 			}
 		}()
 	}
 
 	started := time.Now()
-	// A nil file filter keeps every file; the ignore callback handles dirs.
-	tree := analyzer.AnalyzeDir(absRoot, ignoreFunc(absRoot, opts), nil)
-	if err := ctx.Err(); err != nil {
+	tree, err := w.walk(absRoot)
+	if err != nil {
 		return nil, err
 	}
-	tree.UpdateStats(make(gdufs.HardLinkedItems))
 	elapsed := time.Since(started)
 
-	dirs, unreadable := collect(tree, opts.minDirSize())
-	snap := &model.Snapshot{
+	return &model.Snapshot{
 		Root:       absRoot,
 		StartedAt:  started,
 		Duration:   elapsed,
-		TotalUsage: tree.GetUsage(),
-		ItemCount:  tree.GetItemCount(),
-		Dirs:       dirs,
-		Unreadable: unreadable,
-	}
-	return snap, nil
+		TotalUsage: tree.usage,
+		ItemCount:  tree.count,
+		Dirs:       collect(tree, opts.minDirSize()),
+		Unreadable: w.unreadable.Load(),
+	}, nil
 }
-
-// errorFlag is the marker gdu puts on an item it could not read.
-const errorFlag = '!'
 
 // collect flattens the tree into rows, dropping directories below threshold.
 //
@@ -132,44 +106,37 @@ const errorFlag = '!'
 // set closed upwards, and lets a directory's recorded SelfUsage absorb every
 // dropped descendant simply by subtracting only the children that were kept.
 // The recorded SelfUsage values therefore still sum to the root's total.
-func collect(root gdufs.Item, minSize int64) (dirs []model.DirStat, unreadable int64) {
+func collect(root *node, minSize int64) []model.DirStat {
 	var out []model.DirStat
 
-	var visit func(item gdufs.Item)
-	visit = func(item gdufs.Item) {
-		if !item.IsDir() {
-			return
-		}
-
-		var keptChildren int64
-		var kept []gdufs.Item
-		for child := range item.GetFiles(gdufs.SortBySize, gdufs.SortDesc) {
-			if child.GetFlag() == errorFlag {
-				unreadable++
-			}
-			if child.IsDir() && child.GetUsage() >= minSize {
-				keptChildren += child.GetUsage()
-				kept = append(kept, child)
+	var visit func(n *node)
+	visit = func(n *node) {
+		var keptUsage int64
+		var kept []*node
+		for _, c := range n.children {
+			if c.usage >= minSize {
+				keptUsage += c.usage
+				kept = append(kept, c)
 			}
 		}
 
 		out = append(out, model.DirStat{
-			Path:      item.GetPath(),
-			Usage:     item.GetUsage(),
-			SelfUsage: item.GetUsage() - keptChildren,
-			ItemCount: item.GetItemCount(),
+			Path:      n.path,
+			Usage:     n.usage,
+			SelfUsage: n.usage - keptUsage,
+			ItemCount: n.count,
 		})
 
-		for _, child := range kept {
-			visit(child)
+		for _, c := range kept {
+			visit(c)
 		}
 	}
 
 	visit(root)
-	return out, unreadable
+	return out
 }
 
-func ignoreFunc(root string, opts Options) func(name, path string) bool {
+func ignoreFunc(opts Options) func(name, path string) bool {
 	ignorePaths := make(map[string]struct{}, len(opts.IgnorePaths))
 	for _, p := range opts.IgnorePaths {
 		if abs, err := filepath.Abs(ExpandHome(p)); err == nil {
