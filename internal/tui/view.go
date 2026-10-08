@@ -91,14 +91,14 @@ func (m *Model) viewError() string {
 		subtleTxt.Render(m.err.Error()) + "\n\n  " + helpBar.Render("q quit") + "\n"
 }
 
-// viewNeedScan explains why -no-scan has nothing to show and offers the only
+// viewNeedScan explains why a run without -scan has nothing to show and offers the only
 // two ways forward: scan now, or leave the database untouched and quit.
 func (m *Model) viewNeedScan() string {
 	lines := []string{
 		warnTxt.Render("Nothing to compare yet"),
 		"",
 		subtleTxt.Render("Comparing needs two recorded scans: one to be the baseline,"),
-		subtleTxt.Render("one to measure against it. -no-scan only reads what is stored."),
+		subtleTxt.Render("one to measure against it. Without -scan only what is stored is read."),
 		"",
 	}
 	for _, r := range m.needScan {

@@ -33,11 +33,11 @@ external tools to install.
 ## Usage
 
 ```bash
-disk-space-differ                 # scan configured roots, open the TUI
-disk-space-differ ~/Downloads     # scan a specific directory instead
-disk-space-differ --no-scan       # open the stored scans, instantly
+disk-space-differ                 # open the stored scans, instantly
+disk-space-differ --scan          # scan configured roots, then open the TUI
+disk-space-differ --scan ~/Downloads  # scan a specific directory instead
 disk-space-differ --scans 10      # compare across the last ten scans
-disk-space-differ --plain         # print and exit (for cron)
+disk-space-differ --scan --plain  # scan, print and exit (for cron)
 disk-space-differ --json          # machine-readable output
 disk-space-differ --report         # charted HTML report, opened in the browser
 disk-space-differ --init-config   # write a default config file
@@ -75,13 +75,14 @@ further back rather than showing a different tree — the table stays where it i
 and only the numbers reach deeper. `+` past the oldest stored scan stops there
 and says so.
 
-### `--no-scan`
+### `--scan`
 
-`--no-scan` skips scanning entirely and reports the scans already in the
-database, so it opens instantly and works with `--plain`, `--json` and
-`--report` too. It records nothing, so the same command keeps giving the same
-answer instead of each run becoming the next one's baseline — and the numbers
-are the disk as of the last scan, not as of now. Press `r` in the TUI to rescan.
+Without `--scan` nothing is scanned: the scans already in the database are
+reported, so it opens instantly, and that holds for `--plain`, `--json` and
+`--report` too. Such a run records nothing, so the same command keeps giving
+the same answer instead of each run becoming the next one's baseline — and the
+numbers are the disk as of the last scan, not as of now. `--scan` scans the
+roots and records a snapshot first. Press `r` in the TUI to rescan.
 
 Comparing needs two recorded scans. With fewer, the TUI says so and offers to
 scan now or quit; `--plain` and `--json` exit with that message.
@@ -182,7 +183,7 @@ keep the context you need before deleting something.
 
 ```bash
 disk-space-differ --report            # scan, then write the report and open it
-disk-space-differ --report --no-scan  # rebuild from stored snapshots
+disk-space-differ --report         # rebuild from stored snapshots
 ```
 
 `--report` always writes `report.html` in the working directory, replacing the
@@ -256,11 +257,11 @@ Growth is only meaningful against a previous run, so a regular cadence is what
 makes the trend column useful:
 
 ```cron
-0 9 * * * /usr/local/bin/disk-space-differ --plain >> ~/disk-growth.log 2>&1
+0 9 * * * /usr/local/bin/disk-space-differ --scan --plain >> ~/disk-growth.log 2>&1
 ```
 
 `--report` is not for cron: it opens a browser. Scan on a schedule with
-`--plain`, then read the history whenever you like with `--report --no-scan`.
+`--plain`, then read the history whenever you like with `--report`.
 
 ## Deleting
 

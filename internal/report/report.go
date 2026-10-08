@@ -288,7 +288,7 @@ func StoredCount(st *store.Store, root string) (int, error) {
 }
 
 // FromStore reports the change across the last scans recorded for root, without
-// touching the disk. It is what -no-scan reads: the comparison ends where the
+// touching the disk. It is what a run without -scan reads: the comparison ends where the
 // last scan ended, so it stays put rather than drifting with the filesystem.
 //
 // scans is how many recorded scans the window spans — 2 compares the last two

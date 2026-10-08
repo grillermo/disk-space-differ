@@ -18,10 +18,10 @@ compare the *same* change at different flag values, restore the database between
 runs rather than scanning repeatedly:
 
 ```bash
-dsd -plain -db /tmp/t/s.db -root /tmp/tree     # run 1 records the baseline
+dsd -scan -plain -db /tmp/t/s.db -root /tmp/tree     # run 1 records the baseline
 cp -r /tmp/t /tmp/t.bak                        # ...then make changes on disk
 rm -rf /tmp/t && cp -r /tmp/t.bak /tmp/t       # restore before each comparison run
-dsd -plain -level 3 -db /tmp/t/s.db -root /tmp/tree
+dsd -scan -plain -level 3 -db /tmp/t/s.db -root /tmp/tree
 ```
 
 Go 1.26. Only stdlib plus bubbletea/lipgloss and modernc.org/sqlite (pure Go,
@@ -117,7 +117,7 @@ is final before its ancestor reads it.
 
 `report.Run` scans, records, and compares against the run before it.
 `report.FromStore` compares snapshots that are already recorded and **writes
-nothing** — it is what `-no-scan` reads and what `+`/`-` re-read. Recording there
+nothing** — it is what a run without `-scan` reads and what `+`/`-` re-read. Recording there
 would make every read the next read's baseline, so the same command would stop
 giving the same answer.
 

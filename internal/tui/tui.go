@@ -62,7 +62,7 @@ const (
 	stateError
 )
 
-// shortRoot is a root that -no-scan cannot report on yet, and how many of the
+// shortRoot is a root that a run without -scan cannot report on yet, and how many of the
 // two scans a comparison needs it has.
 type shortRoot struct {
 	root   string
@@ -185,7 +185,7 @@ type Model struct {
 	scans  int
 	stored int
 
-	// needScan lists the roots that -no-scan found too few stored scans for.
+	// needScan lists the roots that a run without -scan found too few stored scans for.
 	needScan []shortRoot
 }
 

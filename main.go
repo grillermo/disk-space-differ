@@ -50,7 +50,7 @@ func run() error {
 		plain      = flag.Bool("plain", false, "print the report and exit instead of opening the TUI")
 		asJSON     = flag.Bool("json", false, "print the report as JSON and exit")
 		htmlReport = flag.Bool("report", false, "write report.html with charts here, replacing any earlier one, and open it")
-		noScan     = flag.Bool("no-scan", false, "report the stored snapshots without scanning; starts instantly")
+		scanNow    = flag.Bool("scan", false, "scan the roots and record a snapshot first; without it the stored snapshots are reported as they are")
 		scans      = flag.Int("scans", report.MinScans, "how many recorded scans the comparison spans: 2 is the last two, more reaches further back (+/- in the TUI)")
 		initConfig = flag.Bool("init-config", false, "write a default config file and exit")
 		showVer    = flag.Bool("version", false, "print the version and exit")
@@ -99,13 +99,13 @@ func run() error {
 	defer st.Close()
 
 	if *htmlReport {
-		return runHTML(cfg, st, reportFile, *noScan)
+		return runHTML(cfg, st, reportFile, !*scanNow)
 	}
 	window := max(report.MinScans, *scans)
 	if *plain || *asJSON {
-		return runPlain(cfg, st, *asJSON, max(1, *lvl), *noScan, window)
+		return runPlain(cfg, st, *asJSON, max(1, *lvl), !*scanNow, window)
 	}
-	return runTUI(cfg, st, *noScan, window)
+	return runTUI(cfg, st, !*scanNow, window)
 }
 
 // reportFile is where -report always writes: one file in the working directory,
@@ -167,13 +167,14 @@ func usage() {
 Usage:
   disk-space-differ [flags] [dir...]
 
-Each run scans the configured roots, records a snapshot, and reports the
-directories that grew the most since the previous run. Growth is attributed
+Reports the directories that grew the most between the last two recorded
+scans. Nothing is scanned unless you pass -scan, which first records a new
+snapshot; that snapshot becomes the next run's baseline. Growth is attributed
 exclusively, so a directory is charged only for the bytes it is actually
 responsible for rather than for everything beneath it.
 
-With no previous run to compare against, the first run records a baseline and
-lists the directories holding the most space.
+With no previous scan to compare against, the first -scan records a baseline
+and lists the directories holding the most space.
 
 Flags:
 `, version)
@@ -217,7 +218,7 @@ func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan b
 			}
 		}
 		if errors.Is(err, report.ErrNeedTwoScans) {
-			return fmt.Errorf("%w — run without -no-scan twice to record them", err)
+			return fmt.Errorf("%w — run with -scan twice to record them", err)
 		}
 		if err != nil {
 			return err
