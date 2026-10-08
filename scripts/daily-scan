@@ -1,0 +1,36 @@
+#!/bin/sh
+# Runs one recorded scan per day, at or after 02:00 local time.
+#
+# launchd calls this at 02:00 and again every time the agent loads (login/boot).
+# The 02:00 call covers a sleeping Mac (launchd fires missed calendar jobs on
+# wake); the load-time call covers a powered-off Mac. Both land here, so the
+# stamp check below is what stops a reboot at noon from scanning a second time.
+#
+# DSD_STAMP and DSD_ARGS exist so the catch-up logic can be tried against a
+# throwaway tree and database.
+set -eu
+cd "$(dirname "$0")/.."
+
+bin=bin/disk-space-differ
+stamp=${DSD_STAMP:-$HOME/.local/state/disk-space-differ/last-scan}
+mkdir -p "$(dirname "$stamp")"
+
+# Most recent 02:00 that is not in the future: today's, or yesterday's before 2am.
+due=$(date -v2H -v0M -v0S +%s)
+now=$(date +%s)
+[ "$due" -le "$now" ] || due=$(date -v-1d -v2H -v0M -v0S +%s)
+
+if [ -e "$stamp" ]; then
+  last=$(stat -f %m "$stamp")
+  if [ "$last" -ge "$due" ]; then
+    echo "$(date '+%F %T') already scanned since the last 02:00, skipping"
+    exit 0
+  fi
+fi
+
+echo "$(date '+%F %T') scanning"
+# shellcheck disable=SC2086  # DSD_ARGS is a deliberately word-split flag list
+"$bin" -scan -plain ${DSD_ARGS:-}
+# Stamp only after success, so a failed scan is retried at the next load.
+touch "$stamp"
+echo "$(date '+%F %T') done"
