@@ -49,7 +49,8 @@ func (o Options) minDirSize() int64 {
 // called roughly every 100ms on a separate goroutine.
 //
 // Usage is allocated bytes, not apparent size, so sparse and compressed files
-// count for what they actually take on disk. A hard-linked file is counted once.
+// count for what they actually take on disk. A hard-linked file, or an APFS
+// clone sharing all of its blocks with another file, is counted once.
 //
 // Cancelling ctx stops the walk and returns ctx.Err().
 func Scan(ctx context.Context, root string, opts Options, onProgress func(Progress)) (*model.Snapshot, error) {

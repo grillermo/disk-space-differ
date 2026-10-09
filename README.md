@@ -276,7 +276,10 @@ directory and `/` are refused outright.
 - Directories the scanner cannot open — usually macOS privacy protections — are
   counted and reported. Their contents are missing from the totals, so a
   non-zero count means the report understates real usage.
-- Hard links are counted once per scan.
+- Hard links are counted once per scan, and on macOS so are APFS clones that
+  share all of their blocks (`cp -c`, Finder duplicates, pnpm installs). A copy
+  whose original lies outside the scanned root is counted in full, and so is a
+  clone edited after copying, which shares only part of its blocks.
 - Parallel scanning is tuned for SSDs. On spinning disks seek time dominates and
   the advantage shrinks.
 

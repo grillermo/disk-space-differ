@@ -37,10 +37,20 @@ const (
 	attrFileLinkCount = 0x00000001
 	attrFileAllocSize = 0x00000004
 
+	// The ATTR_CMNEXT_* attributes travel in the fork bitmap and need
+	// fsoptAttrCmnExtended.
+	attrCmnExtCloneID  = 0x00000100
+	attrCmnExtExtFlags = 0x00000200
+
+	// efSharesAllBlocks marks a full clone: every block is shared with another
+	// file, which reports the same clone ID.
+	efSharesAllBlocks = 0x00000040
+
 	// fsoptPackInvalAttrs keeps an invalid common attribute in the record
 	// instead of leaving it out, so the common block sits at fixed offsets.
 	// It does not extend to file attributes, which a directory's record omits.
-	fsoptPackInvalAttrs = 0x00000008
+	fsoptPackInvalAttrs  = 0x00000008
+	fsoptAttrCmnExtended = 0x00000020
 
 	vdir = 2
 	vlnk = 5
@@ -48,8 +58,9 @@ const (
 
 // Offsets into one record, as the kernel actually lays it out: the returned
 // set first, then ATTR_CMN_ERROR, then the remaining common attributes in bit
-// order, then the file attributes, each 4-byte aligned. The error coming
-// second is not what bit order would suggest, but matches Apple's own example.
+// order, then the file attributes, then the extended common attributes, each
+// 4-byte aligned. The error coming second is not what bit order would suggest,
+// but matches Apple's own example.
 const (
 	offReturned  = 4  // attribute_set_t: common, vol, dir, file, fork
 	offError     = 24 // uint32
@@ -59,8 +70,11 @@ const (
 	offFileID    = 44 // uint64
 	offLinkCount = 52 // uint32
 	offAllocSize = 56 // off_t
+	offCloneID   = 64 // uint64
+	offExtFlags  = 72 // uint64
 	commonEnd    = 52
 	fileEnd      = 64
+	cloneEnd     = 80
 )
 
 type attrList struct {
@@ -78,7 +92,15 @@ var bulkAttrs = attrList{
 	commonAttr: attrCmnReturnedAttrs | attrCmnName | attrCmnDevID |
 		attrCmnObjType | attrCmnFileID | attrCmnError,
 	fileAttr: attrFileLinkCount | attrFileAllocSize,
+	// An APFS clone is a separate file with one link, so only its clone ID
+	// shows that its blocks are already counted elsewhere. pnpm clones every
+	// package file out of its store. Asking for it in the same bulk call costs
+	// about 5% of a scan; ATTR_CMNEXT_PRIVATESIZE, which would also settle
+	// partially shared clones, doubled it and moves with local snapshots.
+	forkAttr: attrCmnExtCloneID | attrCmnExtExtFlags,
 }
+
+const bulkOptions = fsoptPackInvalAttrs | fsoptAttrCmnExtended
 
 // bulkBufSize holds a few thousand records per call; every walker goroutine
 // owns one, so it is kept well short of anything that would matter in memory.
@@ -96,15 +118,26 @@ func readDir(path string, buf *[]byte, fn func(e *entry)) error {
 	}
 	b := *buf
 	al := bulkAttrs
+	opts := uintptr(bulkOptions)
+	first := true
 
 	var e entry
 	for {
 		n, _, errno := syscall_syscall6(libc_getattrlistbulk_trampoline_addr,
 			uintptr(fd), uintptr(unsafe.Pointer(&al)), uintptr(unsafe.Pointer(&b[0])),
-			uintptr(len(b)), fsoptPackInvalAttrs, 0)
+			uintptr(len(b)), opts, 0)
 		if errno == syscall.EINTR {
 			continue
 		}
+		if errno == syscall.EINVAL && first && al.forkAttr != 0 {
+			// A filesystem may do bulk reads but refuse the clone attributes.
+			// It cannot hold clones either, so read it without them rather
+			// than fall back to an lstat per file.
+			al.forkAttr = 0
+			opts = fsoptPackInvalAttrs
+			continue
+		}
+		first = false
 		if errno != 0 {
 			if errno == syscall.ENOTSUP || errno == syscall.EINVAL {
 				// A filesystem without bulk attribute support; read it the
@@ -155,6 +188,11 @@ func readDir(path string, buf *[]byte, fn func(e *entry)) error {
 				e.nlink = uint64(binary.LittleEndian.Uint32(r[offLinkCount:]))
 				e.ino = binary.LittleEndian.Uint64(r[offFileID:])
 				e.dev = uint64(binary.LittleEndian.Uint32(r[offDevID:]))
+				ext := binary.LittleEndian.Uint32(r[offReturned+16:])
+				if ext&attrCmnExtCloneID != 0 && ext&attrCmnExtExtFlags != 0 && len(r) >= cloneEnd {
+					e.clone = binary.LittleEndian.Uint64(r[offCloneID:])
+					e.cloned = binary.LittleEndian.Uint64(r[offExtFlags:])&efSharesAllBlocks != 0
+				}
 			}
 			fn(&e)
 		}

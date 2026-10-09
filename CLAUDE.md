@@ -82,7 +82,13 @@ attributes.
 
 Two details are load-bearing. A hard-linked file is charged to the
 lexicographically smallest directory holding a link, so the charge doesn't move
-between scans. Opening a directory inside another app's `~/Library/Containers`
+between scans. A full APFS clone (pnpm installs every package file as one) has
+its own inode and a single link, so the claim is keyed on `ATTR_CMNEXT_CLONEID`
+instead, which full clones share and which equals the inode otherwise; that
+keeps hard links and clones of one file on one claim. Clones that have diverged
+get a new clone ID and are charged in full, and `ATTR_CMNEXT_PRIVATESIZE` is
+deliberately not used: it doubles the scan time and shifts with local
+snapshots. Opening a directory inside another app's `~/Library/Containers`
 sometimes blocks for 5–6 s on a macOS data protection check and returns `EINTR`.
 `openDir` retries it, because giving up would drop a different directory from
 every snapshot.

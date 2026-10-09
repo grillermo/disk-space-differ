@@ -23,6 +23,21 @@ type entry struct {
 	nlink   uint64
 	ino     uint64
 	dev     uint64
+
+	// clone identifies the file's data where the filesystem tracks clones:
+	// full clones share it, and a file that is no clone reports its own inode,
+	// so hard links share it too. Zero where it is unknown.
+	clone  uint64
+	cloned bool // shares all of its blocks with another file
+}
+
+// dataKey names the blocks an entry occupies, so that every name for the same
+// data, whether a hard link or a full clone, settles on one claim.
+func (e *entry) dataKey() dataID {
+	if e.clone != 0 {
+		return dataID{e.dev, e.clone}
+	}
+	return dataID{e.dev, e.ino}
 }
 
 // node is one directory of the walked tree. Only directories are kept: the
@@ -37,7 +52,7 @@ type node struct {
 	usage, count int64 // cumulative, filled in by total
 }
 
-type inodeKey struct{ dev, ino uint64 }
+type dataID struct{ dev, ino uint64 }
 
 type claim struct {
 	n     *node
@@ -57,12 +72,15 @@ type walker struct {
 	usage      atomic.Int64
 	current    atomic.Pointer[string]
 
-	// A hard-linked file is charged once, to the directory with the smallest
-	// path among those holding a link to it. Settling it by path rather than by
+	// A hard-linked or fully cloned file is charged once, to the directory with
+	// the smallest path among those holding a name for its data. A clone edited
+	// after copying shares only some blocks, gets a clone ID of its own and is
+	// charged in full: over-counting a little beats losing bytes from the
+	// conservation total. Settling it by path rather than by
 	// whichever goroutine got there first keeps the charge in the same place
 	// from one scan to the next, so it never shows up as a spurious move.
 	linksMu sync.Mutex
-	links   map[inodeKey]claim
+	links   map[dataID]claim
 }
 
 func newWalker(ctx context.Context, ignore func(name, path string) bool, follow bool) *walker {
@@ -76,13 +94,13 @@ func newWalker(ctx context.Context, ignore func(name, path string) bool, follow 
 		// blocks for several seconds on a data protection check: with plenty of
 		// slots the rest of the tree is read while that one waits.
 		sem:   make(chan struct{}, 4*runtime.GOMAXPROCS(0)),
-		links: map[inodeKey]claim{},
+		links: map[dataID]claim{},
 	}
 	w.bufs.New = func() any { return new([]byte) }
 	return w
 }
 
-// walk reads the tree under root and returns it with hard links settled and
+// walk reads the tree under root and returns it with shared data settled and
 // cumulative totals filled in.
 func (w *walker) walk(root string) (*node, error) {
 	info, err := os.Stat(root)
@@ -165,8 +183,8 @@ func (w *walker) readNode(n *node) error {
 		if e.symlink && w.follow {
 			usage = w.followed(filepath.Join(n.path, string(e.name)), usage)
 		}
-		if e.nlink > 1 {
-			w.claimLink(inodeKey{e.dev, e.ino}, n, usage)
+		if e.nlink > 1 || e.cloned {
+			w.claimLink(e.dataKey(), n, usage)
 		} else {
 			n.self += usage
 		}
@@ -188,7 +206,7 @@ func (w *walker) followed(path string, own int64) int64 {
 	return int64(st.Blocks) * 512
 }
 
-func (w *walker) claimLink(k inodeKey, n *node, usage int64) {
+func (w *walker) claimLink(k dataID, n *node, usage int64) {
 	w.linksMu.Lock()
 	defer w.linksMu.Unlock()
 	if c, ok := w.links[k]; ok && c.n.path <= n.path {
