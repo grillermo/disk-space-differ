@@ -146,3 +146,21 @@ func TestTheRescanAfterADeleteLeavesTheScopeAlone(t *testing.T) {
 		t.Errorf("status %q, want the deletion still reported", m.status)
 	}
 }
+
+// Shift held down by habit must not turn a delete into a silent no-op: D goes
+// through the same checks and confirmation as d, and so to the same rescan.
+func TestShiftDDeletesLikeD(t *testing.T) {
+	lower := testModel(t, []*report.Result{layeredResult()})
+	upper := testModel(t, []*report.Result{layeredResult()})
+
+	lower.press(t, "d")
+	upper.press(t, "D")
+
+	if upper.state != lower.state || upper.status != lower.status {
+		t.Errorf("D left state %v (%q), d left state %v (%q)",
+			upper.state, upper.status, lower.state, lower.status)
+	}
+	if upper.status == "" {
+		t.Error("D did nothing at all")
+	}
+}

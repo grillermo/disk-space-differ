@@ -487,7 +487,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.scanSelected()
 	case "o":
 		return m.openCmd()
-	case "d", "delete":
+	case "d", "D", "delete":
 		m.beginDelete()
 	case " ":
 		if row, ok := m.selectedRow(); ok {
