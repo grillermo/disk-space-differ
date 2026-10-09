@@ -1,0 +1,14 @@
+#!/bin/sh
+# Run by git-sync after it lands new commits here (see git-sync's README,
+# "./activate"): rebuild this machine's binary. Runs with no tty and no login
+# shell, so PATH is set here. Safe to run by hand.
+set -eu
+cd "$(dirname "$0")"
+export PATH="/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# Nothing that goes into the binary changed: done.
+if [ -n "${GITSYNC_OLD_REV:-}" ] &&
+  git diff --quiet "$GITSYNC_OLD_REV" "${GITSYNC_NEW_REV:-HEAD}" -- '*.go' go.mod go.sum build; then
+  exit 0
+fi
+exec ./build
