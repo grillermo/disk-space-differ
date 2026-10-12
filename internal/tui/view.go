@@ -129,6 +129,7 @@ func (m *Model) viewConfirm() string {
 			humanize.Bytes(target.Usage), "this cannot be undone")),
 		"",
 		"  " + dangerTxt.Render("y") + subtleTxt.Render(" delete") +
+			"    " + dangerTxt.Render("Y") + subtleTxt.Render(" delete and rescan") +
 			"    " + accentTxt.Render("any other key") + subtleTxt.Render(" cancel"),
 	}, "\n")
 

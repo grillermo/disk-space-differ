@@ -115,6 +115,10 @@ type (
 		path  string
 		freed int64
 		err   error
+		// rescan asks for the containing folder to be measured again. It is
+		// opt-in (Y, not y) because a rescan blocks the screen, and clearing
+		// several folders in a row should not cost one scan per deletion.
+		rescan bool
 	}
 )
 
@@ -376,6 +380,9 @@ func (m *Model) handleDeleted(msg deletedMsg) tea.Cmd {
 	}
 	m.deleted[msg.path] = true
 	m.status = fmt.Sprintf("deleted %s", msg.path)
+	if !msg.rescan {
+		return nil
+	}
 	return m.rescanContaining(msg.path)
 }
 
@@ -501,9 +508,10 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "y", "Y":
 		target := m.deleteTarget
+		rescan := msg.String() == "Y"
 		return func() tea.Msg {
 			err := os.RemoveAll(target.Path)
-			return deletedMsg{path: target.Path, freed: target.Usage, err: err}
+			return deletedMsg{path: target.Path, freed: target.Usage, err: err, rescan: rescan}
 		}
 	default:
 		m.state = stateTable
