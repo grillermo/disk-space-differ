@@ -215,4 +215,6 @@ the home directory and any scan root; keep that guard intact.
 
 ## Workflow
 
-After every successful and complete change ./build the binary
+After every successful and complete change ./build the binary and ask the user to 
+re-add full disk permissions in Privacy and Security settings by removing the 
+current entry and re-adding the {FULL PATH TO BINARY}
