@@ -29,6 +29,17 @@ type Snapshot struct {
 	// permissions. Their contents are missing from the totals, so a non-zero
 	// count means the report understates real usage.
 	Unreadable int64
+
+	// Failures names what Unreadable counted. Only a snapshot fresh from a scan
+	// carries it: the list exists to diagnose missing permissions, not to be
+	// compared between runs, so it is never stored.
+	Failures []Failure
+}
+
+// Failure is one entry a scan could not read.
+type Failure struct {
+	Path string
+	Err  error
 }
 
 // ChangeKind explains why a directory appears in a growth report.

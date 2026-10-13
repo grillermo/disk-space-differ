@@ -54,6 +54,7 @@ func run() error {
 		scans      = flag.Int("scans", report.MinScans, "how many recorded scans the comparison spans: 2 is the last two, more reaches further back (+/- in the TUI)")
 		initConfig = flag.Bool("init-config", false, "write a default config file and exit")
 		showVer    = flag.Bool("version", false, "print the version and exit")
+		unreadable = flag.Bool("unreadable", false, "with -scan -plain, list every entry the scan could not read and why")
 	)
 	flag.Var(&roots, "root", "directory to scan; repeatable, overrides config")
 
@@ -103,7 +104,7 @@ func run() error {
 	}
 	window := max(report.MinScans, *scans)
 	if *plain || *asJSON {
-		return runPlain(cfg, st, *asJSON, max(1, *lvl), !*scanNow, window)
+		return runPlain(cfg, st, *asJSON, max(1, *lvl), !*scanNow, window, *unreadable)
 	}
 	return runTUI(cfg, st, !*scanNow, window)
 }
@@ -195,7 +196,11 @@ func runTUI(cfg config.Config, st *store.Store, noScan bool, scans int) error {
 
 // runPlain produces the same report without the interactive layer, for cron
 // jobs and shell pipelines.
-func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan bool, scans int) error {
+func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan bool, scans int, listFailures bool) error {
+	if listFailures && noScan {
+		return errors.New("-unreadable needs -scan: which entries failed is only known during a scan, and is not stored")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -214,7 +219,11 @@ func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan b
 			// The fresh scan is now the newest stored one, so a wider window is
 			// the same report read further back rather than a second scan.
 			if err == nil && scans > report.MinScans && !res.Baseline {
+				failures := res.Current.Failures
 				res, err = report.FromStore(st, root, scans)
+				if err == nil {
+					res.Current.Failures = failures
+				}
 			}
 		}
 		if errors.Is(err, report.ErrNeedTwoScans) {
@@ -229,11 +238,11 @@ func runPlain(cfg config.Config, st *store.Store, asJSON bool, lvl int, noScan b
 	if asJSON {
 		return printJSON(results, lvl, cfg.Top)
 	}
-	printText(results, lvl, cfg.Top)
+	printText(results, lvl, cfg.Top, listFailures)
 	return nil
 }
 
-func printText(results []*report.Result, lvl, top int) {
+func printText(results []*report.Result, lvl, top int, listFailures bool) {
 	for _, res := range results {
 		fmt.Printf("\n%s\n", res.Root)
 
@@ -259,6 +268,11 @@ func printText(results []*report.Result, lvl, top int) {
 		if res.Current.Unreadable > 0 {
 			fmt.Printf("  note: %d entries were unreadable and are missing from these totals\n",
 				res.Current.Unreadable)
+			if listFailures {
+				for _, f := range res.Current.Failures {
+					fmt.Printf("    %s: %v\n", f.Path, f.Err)
+				}
+			}
 		}
 		if !res.Baseline {
 			fmt.Printf("  top %d by growth at level %d of %d:\n", top, min(lvl, res.MaxLevel()), res.MaxLevel())

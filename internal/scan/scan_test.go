@@ -245,6 +245,9 @@ func TestUnreadableDirectoryIsCountedNotFatal(t *testing.T) {
 	if snap.Unreadable != 1 {
 		t.Errorf("Unreadable = %d, want 1", snap.Unreadable)
 	}
+	if len(snap.Failures) != 1 || snap.Failures[0].Path != locked || snap.Failures[0].Err == nil {
+		t.Errorf("Failures = %v, want one naming %s with its error", snap.Failures, locked)
+	}
 }
 
 // Recording an empty snapshot for a root that is not there would make the next

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/grillermo/disk-space-differ/internal/model"
 )
 
 // entry is one item of a directory as a reader reports it. name aliases the
@@ -18,7 +20,8 @@ type entry struct {
 	name    []byte
 	dir     bool
 	symlink bool
-	failed  bool // its attributes could not be read
+	failed  bool  // its attributes could not be read
+	err     error // why, when failed
 	usage   int64
 	nlink   uint64
 	ino     uint64
@@ -68,6 +71,8 @@ type walker struct {
 	bufs   sync.Pool
 
 	unreadable atomic.Int64
+	failMu     sync.Mutex
+	failures   []model.Failure
 	items      atomic.Int64
 	usage      atomic.Int64
 	current    atomic.Pointer[string]
@@ -152,10 +157,17 @@ func (w *walker) descend(n *node) {
 
 func (w *walker) visit(n *node) {
 	if err := w.readNode(n); err != nil {
-		w.unreadable.Add(1)
+		w.fail(n.path, err)
 		return
 	}
 	w.descend(n)
+}
+
+func (w *walker) fail(path string, err error) {
+	w.unreadable.Add(1)
+	w.failMu.Lock()
+	w.failures = append(w.failures, model.Failure{Path: path, Err: err})
+	w.failMu.Unlock()
 }
 
 func (w *walker) readNode(n *node) error {
@@ -165,7 +177,11 @@ func (w *walker) readNode(n *node) error {
 
 	err := readDir(n.path, buf, func(e *entry) {
 		if e.failed {
-			w.unreadable.Add(1)
+			path := n.path
+			if len(e.name) > 0 {
+				path = filepath.Join(n.path, string(e.name))
+			}
+			w.fail(path, e.err)
 			return
 		}
 		if e.dir {

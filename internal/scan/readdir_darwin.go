@@ -161,20 +161,18 @@ func readDir(path string, buf *[]byte, fn func(e *entry)) error {
 
 			e = entry{}
 			returned := binary.LittleEndian.Uint32(r[offReturned:])
+			if returned&attrCmnName != 0 {
+				e.name = recordName(r)
+			}
 			if returned&attrCmnError != 0 && binary.LittleEndian.Uint32(r[offError:]) != 0 {
 				e.failed = true
+				e.err = syscall.Errno(binary.LittleEndian.Uint32(r[offError:]))
 				fn(&e)
 				continue
 			}
-			if returned&attrCmnName == 0 {
+			if e.name == nil {
 				continue
 			}
-			nameOff := offName + int(int32(binary.LittleEndian.Uint32(r[offName:])))
-			nameLen := int(binary.LittleEndian.Uint32(r[offName+4:]))
-			if nameLen == 0 || nameOff < 0 || nameOff+nameLen > len(r) {
-				continue
-			}
-			e.name = r[nameOff : nameOff+nameLen-1] // drop the NUL
 
 			switch binary.LittleEndian.Uint32(r[offObjType:]) {
 			case vdir:
@@ -197,6 +195,17 @@ func readDir(path string, buf *[]byte, fn func(e *entry)) error {
 			fn(&e)
 		}
 	}
+}
+
+// recordName returns the entry name packed in record r, or nil if the
+// reference points outside it.
+func recordName(r []byte) []byte {
+	nameOff := offName + int(int32(binary.LittleEndian.Uint32(r[offName:])))
+	nameLen := int(binary.LittleEndian.Uint32(r[offName+4:]))
+	if nameLen == 0 || nameOff < 0 || nameOff+nameLen > len(r) {
+		return nil
+	}
+	return r[nameOff : nameOff+nameLen-1] // drop the NUL
 }
 
 // openDir retries EINTR, as os.Open does. Opening a directory inside another

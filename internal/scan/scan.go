@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,6 +89,7 @@ func Scan(ctx context.Context, root string, opts Options, onProgress func(Progre
 		return nil, err
 	}
 	elapsed := time.Since(started)
+	sort.Slice(w.failures, func(i, j int) bool { return w.failures[i].Path < w.failures[j].Path })
 
 	return &model.Snapshot{
 		Root:       absRoot,
@@ -97,6 +99,7 @@ func Scan(ctx context.Context, root string, opts Options, onProgress func(Progre
 		ItemCount:  tree.count,
 		Dirs:       collect(tree, opts.minDirSize()),
 		Unreadable: w.unreadable.Load(),
+		Failures:   w.failures,
 	}, nil
 }
 

@@ -27,6 +27,7 @@ func readDirPortable(path string, fn func(e *entry)) error {
 		var st syscall.Stat_t
 		if err := syscall.Lstat(filepath.Join(path, d.Name()), &st); err != nil {
 			e.failed = true
+			e.err = err
 			fn(&e)
 			continue
 		}
