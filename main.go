@@ -257,8 +257,9 @@ func printText(results []*report.Result, lvl, top int, listFailures bool) {
 			if res.Scans > report.MinScans {
 				span = fmt.Sprintf(", across the last %d scans", res.Scans)
 			}
-			fmt.Printf("  %s since %s%s  (now %s, scanned in %s)\n",
+			fmt.Printf("  %s between a scan from %s and one from %s%s  (now %s, scanned in %s)\n",
 				humanize.SignedBytes(res.TotalDelta()),
+				humanize.Since(res.Current.StartedAt),
 				humanize.Since(res.Previous.StartedAt),
 				span,
 				humanize.Bytes(res.Current.TotalUsage),

@@ -8,7 +8,7 @@ directory that never changes is not your problem; a 2 GB cache that regrows
 every week is.
 
 ```
- disk-space-differ                                       compared with 3d ago
+ disk-space-differ          comparing a scan from just now with one from 3d ago
       +4.21 GiB  ~                    77.0 GiB total · 2,388,362 items · 28.9s
 
  #           GROWTH      TREND              TOTAL PATH

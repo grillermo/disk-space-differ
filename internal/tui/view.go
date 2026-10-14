@@ -342,7 +342,7 @@ func (m *Model) renderHeader() string {
 		if res.Scans > report.MinScans {
 			span = fmt.Sprintf("last %d scans · ", res.Scans)
 		}
-		right = subtleTxt.Render(span + "compared with " + humanize.Since(res.Previous.StartedAt))
+		right = subtleTxt.Render(span + "comparing a scan from " + humanize.Since(res.Current.StartedAt) + " with one from " + humanize.Since(res.Previous.StartedAt))
 	} else {
 		right = warnTxt.Render("first run · baseline recorded")
 	}
